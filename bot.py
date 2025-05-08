@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import asyncio
 from dotenv import load_dotenv
 import pytz
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Union
 import math
 
 # Load environment variables
@@ -345,7 +345,7 @@ async def list_pings(
     interaction: discord.Interaction,
     category: Optional[str] = None,
     show_inactive: bool = False,
-    target: Optional[discord.User | discord.Role] = None
+    target: Optional[Union[discord.User, discord.Role]] = None
 ):
     query = '''
         SELECT *
