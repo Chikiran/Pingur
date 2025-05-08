@@ -172,9 +172,9 @@ async def create_reminder_embed(interaction: discord.Interaction, reminder: tupl
 
 @bot.tree.command(name="addping", description="Add a new ping reminder")
 @app_commands.describe(
+    targets="Users/Roles to ping (mention them or use IDs)",
     time_unit="Unit of time for interval",
     interval="Time between pings",
-    targets="Users/Roles to ping (mention them or use IDs)",
     message="Message to send with the ping",
     is_dm="Send as DM instead of channel message (only for users)",
     channel="Channel to send pings (optional)",
@@ -183,9 +183,9 @@ async def create_reminder_embed(interaction: discord.Interaction, reminder: tupl
 )
 async def add_ping(
     interaction: discord.Interaction,
+    targets: str,
     time_unit: Literal['minutes', 'hours', 'days'],
     interval: int,
-    targets: str,
     message: str,
     is_dm: bool = False,
     channel: Optional[discord.TextChannel] = None,
