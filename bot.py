@@ -60,8 +60,6 @@ class PingurBot(commands.Bot):
         self.reminder_cache = {}
         self.guild_settings_cache = {}
         self.cache_lock = asyncio.Lock()
-        self.command_sync_flags = app_commands.CommandSyncFlags.default()
-        self.command_sync_flags.sync_commands = True
         logger.info("Bot initialization started")
 
     async def setup_hook(self):
