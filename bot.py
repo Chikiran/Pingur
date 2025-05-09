@@ -1118,9 +1118,28 @@ async def check_reminders():
                 columns = await cursor.fetchall()
                 logger.info(f"Database columns: {[col[1] for col in columns]}")
             
+            # Use explicit column names in the SELECT statement and proper WHERE clause
             async with db.execute('''
-                SELECT * FROM reminders 
+                SELECT 
+                    id,
+                    guild_id,
+                    channel_id,
+                    user_id,
+                    target_ids,
+                    target_type,
+                    message,
+                    interval,
+                    time_unit,
+                    last_ping,
+                    next_ping,
+                    CAST(dm AS INTEGER) as dm,
+                    CAST(active AS INTEGER) as active,
+                    CAST(recurring AS INTEGER) as recurring,
+                    CAST(ghost_ping AS INTEGER) as ghost_ping,
+                    created_at
+                FROM reminders 
                 WHERE active = 1 AND next_ping <= ?
+                ORDER BY next_ping ASC
             ''', (now.isoformat(),)) as cursor:
                 reminders = await cursor.fetchall()
 
@@ -1137,29 +1156,15 @@ async def check_reminders():
                     # Log the values before conversion
                     logger.info(f"Before conversion - dm: {dm}, active: {active}, recurring: {recurring}, ghost_ping: {ghost_ping}")
                     
-                    # Safely convert boolean fields
-                    try:
-                        is_dm = bool(int(dm)) if dm is not None else False
-                        is_active = bool(int(active)) if active is not None else True
-                        is_recurring = bool(int(recurring)) if recurring is not None else True
-                        is_ghost_ping = bool(int(ghost_ping)) if ghost_ping is not None else False
-                    except (ValueError, TypeError) as e:
-                        logger.error(f"Error converting boolean fields for reminder {id}: {e}")
-                        # Set default values if conversion fails
-                        is_dm = False
-                        is_active = True
-                        is_recurring = True
-                        is_ghost_ping = False
-                        # Update the database with correct values
-                        await db.execute('''
-                            UPDATE reminders 
-                            SET dm = ?, active = ?, recurring = ?, ghost_ping = ?
-                            WHERE id = ?
-                        ''', (0, 1, 1, 0, id))
-                        await db.commit()
+                    # Convert to boolean using the CAST values (should now be proper integers)
+                    is_dm = bool(dm)
+                    is_active = bool(active)
+                    is_recurring = bool(recurring)
+                    is_ghost_ping = bool(ghost_ping)
                     
                     logger.info(f"Processing reminder {id} (ghost_ping={is_ghost_ping}, active={is_active}, recurring={is_recurring}, dm={is_dm})")
                     
+                    # Get the guild
                     guild = bot.get_guild(guild_id)
                     if not guild:
                         logger.error(f'Could not find guild {guild_id} for reminder {id}')
@@ -1204,39 +1209,37 @@ async def check_reminders():
 
                         # Update last ping and next ping times
                         if is_recurring:
+                            # Calculate next ping time
                             interval_minutes = interval * TIME_UNITS[time_unit]
-                            # Calculate next ping time, ensuring it's in the future
-                            next_ping_time = now
-                            while next_ping_time <= now:
-                                next_ping_time += timedelta(minutes=interval_minutes)
+                            next_ping_time = datetime.now(pytz.utc) + timedelta(minutes=interval_minutes)
                             
                             await db.execute('''
                                 UPDATE reminders 
-                                SET last_ping = ?, next_ping = ?
+                                SET last_ping = ?, next_ping = ? 
                                 WHERE id = ?
                             ''', (now.isoformat(), next_ping_time.isoformat(), id))
                         else:
-                            # For one-time reminders, deactivate after sending
+                            # For non-recurring reminders, deactivate after sending
                             await db.execute('''
                                 UPDATE reminders 
-                                SET active = 0, last_ping = ?
+                                SET active = 0, last_ping = ? 
                                 WHERE id = ?
                             ''', (now.isoformat(), id))
                         
                         await db.commit()
-                        logger.info(f"Successfully processed reminder {id} for guild {guild.name}")
-                    except discord.Forbidden:
-                        logger.error(f'Failed to send message to targets in guild {guild.name} - Missing permissions')
+                        logger.info(f"Updated reminder {id} after sending")
+                        
                     except Exception as e:
-                        logger.error(f'Error processing reminder {id}: {str(e)}')
+                        logger.error(f'Error sending reminder {id}: {str(e)}')
                         traceback.print_exc()
+                        
                 except Exception as e:
                     logger.error(f'Error processing reminder {id}: {str(e)}')
                     traceback.print_exc()
                     continue
-
+                    
     except Exception as e:
-        logger.error(f"Error in check_reminders: {str(e)}")
+        logger.error(f'Error in check_reminders: {str(e)}')
         traceback.print_exc()
 
 @check_reminders.before_loop
