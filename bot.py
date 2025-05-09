@@ -943,17 +943,20 @@ async def list_reminders(
                         )
 
                     embed.description += "\n\n" + "\n".join(rows)
-                    await interaction.response.edit_message(embed=embed, view=self)
+                    
+                    # For button updates, use message.edit
+                    await interaction.message.edit(embed=embed, view=self)
                 except Exception as e:
                     logger.error(f"Error in list view update: {str(e)}")
                     traceback.print_exc()
-                    await interaction.followup.send(
+                    await interaction.response.send_message(
                         "An error occurred while updating the list. Please try again.",
                         ephemeral=True
                     )
 
         view = ListView()
-        await interaction.followup.send(embed=await view.update_view(interaction), view=view)
+        initial_embed = await view.update_view(interaction)
+        await interaction.followup.send(embed=initial_embed, view=view)
     except Exception as e:
         logger.error(f"Error in list command: {str(e)}")
         traceback.print_exc()
