@@ -1113,6 +1113,11 @@ async def check_reminders():
         now = datetime.now(pytz.utc)
         
         async with aiosqlite.connect(DB_PATH) as db:
+            # First, let's log the column names to debug
+            async with db.execute("PRAGMA table_info(reminders)") as cursor:
+                columns = await cursor.fetchall()
+                logger.info(f"Database columns: {[col[1] for col in columns]}")
+            
             async with db.execute('''
                 SELECT * FROM reminders 
                 WHERE active = 1 AND next_ping <= ?
@@ -1121,18 +1126,39 @@ async def check_reminders():
 
             for reminder in reminders:
                 try:
-                    # Properly unpack all fields including ghost_ping
+                    # Log the raw reminder data for debugging
+                    logger.info(f"Raw reminder data: {reminder}")
+                    
+                    # Properly unpack all fields in the correct order
                     (id, guild_id, channel_id, user_id, target_ids_str, target_type, 
-                     message, interval, time_unit, last_ping, next_ping, is_dm, active, 
+                     message, interval, time_unit, last_ping, next_ping, dm, active, 
                      recurring, ghost_ping, created_at) = reminder
                     
-                    # Explicitly cast all boolean fields to integers first, then to booleans
-                    is_dm = bool(int(is_dm)) if is_dm is not None else False
-                    active = bool(int(active)) if active is not None else True
-                    recurring = bool(int(recurring)) if recurring is not None else True
-                    ghost_ping = bool(int(ghost_ping)) if ghost_ping is not None else False
+                    # Log the values before conversion
+                    logger.info(f"Before conversion - dm: {dm}, active: {active}, recurring: {recurring}, ghost_ping: {ghost_ping}")
                     
-                    logger.info(f"Processing reminder {id} (ghost_ping={ghost_ping}, active={active}, recurring={recurring}, dm={is_dm})")
+                    # Safely convert boolean fields
+                    try:
+                        is_dm = bool(int(dm)) if dm is not None else False
+                        is_active = bool(int(active)) if active is not None else True
+                        is_recurring = bool(int(recurring)) if recurring is not None else True
+                        is_ghost_ping = bool(int(ghost_ping)) if ghost_ping is not None else False
+                    except (ValueError, TypeError) as e:
+                        logger.error(f"Error converting boolean fields for reminder {id}: {e}")
+                        # Set default values if conversion fails
+                        is_dm = False
+                        is_active = True
+                        is_recurring = True
+                        is_ghost_ping = False
+                        # Update the database with correct values
+                        await db.execute('''
+                            UPDATE reminders 
+                            SET dm = ?, active = ?, recurring = ?, ghost_ping = ?
+                            WHERE id = ?
+                        ''', (0, 1, 1, 0, id))
+                        await db.commit()
+                    
+                    logger.info(f"Processing reminder {id} (ghost_ping={is_ghost_ping}, active={is_active}, recurring={is_recurring}, dm={is_dm})")
                     
                     guild = bot.get_guild(guild_id)
                     if not guild:
@@ -1166,7 +1192,7 @@ async def check_reminders():
                                 sent_message = await channel.send(f'{mentions} {message}')
                                 
                                 # Only delete if this is explicitly a ghost ping
-                                if ghost_ping:
+                                if is_ghost_ping:
                                     try:
                                         await asyncio.sleep(0.1)  # Brief delay to ensure the ping goes through
                                         await sent_message.delete()
@@ -1177,7 +1203,7 @@ async def check_reminders():
                                     logger.info(f"Regular ping message sent and kept for reminder {id}")
 
                         # Update last ping and next ping times
-                        if recurring:
+                        if is_recurring:
                             interval_minutes = interval * TIME_UNITS[time_unit]
                             # Calculate next ping time, ensuring it's in the future
                             next_ping_time = now
