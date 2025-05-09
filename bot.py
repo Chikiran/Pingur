@@ -21,6 +21,9 @@ TIME_UNITS = {
     'days': 1440
 }
 
+# Database setup
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'reminders.db')
+
 # Bot setup
 intents = discord.Intents.default()
 intents.members = True
@@ -40,9 +43,6 @@ class PingurBot(commands.Bot):
             self.tree_sync_flag = True
 
 bot = PingurBot()
-
-# Database setup
-DB_PATH = 'reminders.db'
 
 async def setup_database():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -413,6 +413,77 @@ async def list_pings(
     view = ReminderView(reminders)
     await view.update_view(interaction)
 
+class ReminderSelect(discord.ui.Select):
+    def __init__(self, reminders, command_type="edit"):
+        options = []
+        for r in reminders:
+            rid, _, _, _, target_ids, target_type, msg, interval, time_unit, _, _, is_dm, category, active, _, _ = r
+            preview = f"#{rid} - {msg[:50]}..." if len(msg) > 50 else f"#{rid} - {msg}"
+            options.append(discord.SelectOption(
+                label=preview,
+                value=str(rid),
+                description=f"{interval} {time_unit}, {'DM' if is_dm else 'Channel'}"
+            ))
+        super().__init__(
+            placeholder=f"Choose a reminder to {command_type}...",
+            options=options[:25]  # Discord limits to 25 options
+        )
+        self.command_type = command_type
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_id = int(self.values[0])
+        
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('SELECT * FROM reminders WHERE id = ? AND guild_id = ?', 
+                                (selected_id, interaction.guild_id)) as cursor:
+                reminder = await cursor.fetchone()
+
+        if not reminder:
+            await interaction.response.send_message('❌ Reminder not found!', ephemeral=True)
+            return
+
+        embed = await create_reminder_embed(interaction, reminder)
+        
+        if self.command_type == "edit":
+            embed.title = "✏️ Edit this reminder using /editping with the ID"
+            await interaction.response.send_message(
+                f"Selected reminder #{selected_id}",
+                embed=embed,
+                ephemeral=True
+            )
+        else:  # remove
+            embed.title = "🗑️ Confirm Deletion"
+            embed.description = "Are you sure you want to delete this reminder?"
+
+            class ConfirmView(discord.ui.View):
+                def __init__(self):
+                    super().__init__(timeout=60)
+                    self.value = None
+
+                @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger, emoji="✅")
+                async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute('DELETE FROM reminders WHERE id = ? AND guild_id = ?', 
+                                    (selected_id, interaction.guild_id))
+                        await db.commit()
+                    
+                    embed.title = "✅ Reminder Deleted"
+                    embed.description = None
+                    await interaction.response.edit_message(embed=embed, view=None)
+
+                @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey, emoji="❌")
+                async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    embed.title = "❌ Deletion Cancelled"
+                    embed.description = None
+                    await interaction.response.edit_message(embed=embed, view=None)
+
+            await interaction.response.send_message(embed=embed, view=ConfirmView(), ephemeral=True)
+
+class ReminderSelectView(discord.ui.View):
+    def __init__(self, reminders, command_type="edit"):
+        super().__init__()
+        self.add_item(ReminderSelect(reminders, command_type))
+
 @bot.tree.command(name="editping", description="Edit a reminder")
 @app_commands.describe(
     reminder_id="ID of the reminder to edit",
@@ -448,39 +519,14 @@ async def edit_ping(
             await interaction.response.send_message('❌ No reminders found!', ephemeral=True)
             return
 
-        options = []
-        for r in reminders:
-            rid, _, _, _, target_ids, target_type, msg, interval, time_unit, _, _, is_dm, category, active, _, _ = r
-            preview = f"#{rid} - {msg[:50]}..." if len(msg) > 50 else f"#{rid} - {msg}"
-            options.append(discord.SelectOption(
-                label=preview,
-                value=str(rid),
-                description=f"{interval} {time_unit}, {'DM' if is_dm else 'Channel'}"
-            ))
-
-        class ReminderSelect(discord.ui.Select):
-            def __init__(self):
-                super().__init__(
-                    placeholder="Choose a reminder to edit...",
-                    options=options[:25]  # Discord limits to 25 options
-                )
-
-            async def callback(self, interaction: discord.Interaction):
-                selected_id = int(self.values[0])
-                await edit_ping(interaction, reminder_id=selected_id)
-
-        class ReminderSelectView(discord.ui.View):
-            def __init__(self):
-                super().__init__()
-                self.add_item(ReminderSelect())
-
         await interaction.response.send_message(
             "Select a reminder to edit:",
-            view=ReminderSelectView(),
+            view=ReminderSelectView(reminders, "edit"),
             ephemeral=True
         )
         return
 
+    # Rest of the edit logic...
     async with aiosqlite.connect(DB_PATH) as db:
         # Get current values
         async with db.execute('SELECT * FROM reminders WHERE id = ? AND guild_id = ?', 
@@ -569,38 +615,50 @@ async def remove_ping(
             await interaction.response.send_message('❌ No reminders found!', ephemeral=True)
             return
 
-        options = []
-        for r in reminders:
-            rid, _, _, _, target_ids, target_type, msg, interval, time_unit, _, _, is_dm, category, active, _, _ = r
-            preview = f"#{rid} - {msg[:50]}..." if len(msg) > 50 else f"#{rid} - {msg}"
-            options.append(discord.SelectOption(
-                label=preview,
-                value=str(rid),
-                description=f"{interval} {time_unit}, {'DM' if is_dm else 'Channel'}"
-            ))
-
-        class ReminderSelect(discord.ui.Select):
-            def __init__(self):
-                super().__init__(
-                    placeholder="Choose a reminder to remove...",
-                    options=options[:25]  # Discord limits to 25 options
-                )
-
-            async def callback(self, interaction: discord.Interaction):
-                selected_id = int(self.values[0])
-                await remove_ping(interaction, reminder_id=selected_id)
-
-        class ReminderSelectView(discord.ui.View):
-            def __init__(self):
-                super().__init__()
-                self.add_item(ReminderSelect())
-
         await interaction.response.send_message(
             "Select a reminder to remove:",
-            view=ReminderSelectView(),
+            view=ReminderSelectView(reminders, "remove"),
             ephemeral=True
         )
         return
+
+    # If reminder_id is provided, handle the removal
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT * FROM reminders WHERE id = ? AND guild_id = ?', 
+                            (reminder_id, interaction.guild_id)) as cursor:
+            reminder = await cursor.fetchone()
+
+        if not reminder:
+            await interaction.response.send_message('❌ Reminder not found!', ephemeral=True)
+            return
+
+        embed = await create_reminder_embed(interaction, reminder)
+        embed.title = "🗑️ Confirm Deletion"
+        embed.description = "Are you sure you want to delete this reminder?"
+
+        class ConfirmView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60)
+                self.value = None
+
+            @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger, emoji="✅")
+            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute('DELETE FROM reminders WHERE id = ? AND guild_id = ?', 
+                                   (reminder_id, interaction.guild_id))
+                    await db.commit()
+                
+                embed.title = "✅ Reminder Deleted"
+                embed.description = None
+                await interaction.response.edit_message(embed=embed, view=None)
+
+            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey, emoji="❌")
+            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                embed.title = "❌ Deletion Cancelled"
+                embed.description = None
+                await interaction.response.edit_message(embed=embed, view=None)
+
+        await interaction.response.send_message(embed=embed, view=ConfirmView(), ephemeral=True)
 
 @tasks.loop(seconds=30)  # Check more frequently for accuracy
 async def check_reminders():
@@ -843,4 +901,11 @@ async def help_command(
     await interaction.response.send_message(embed=embed)
 
 # Run the bot
+async def init_db():
+    print("Initializing database...")
+    await setup_database()
+    print("Database initialized successfully!")
+
+# Initialize the database and run the bot
+asyncio.run(init_db())
 bot.run(os.getenv('DISCORD_TOKEN')) 
