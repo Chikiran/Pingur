@@ -200,34 +200,98 @@ bot = PingurBot()
 # Database initialization with improved schema
 @db_operation
 async def setup_database(db):
-    await db.execute('''
-        CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER NOT NULL,
-            channel_id INTEGER,
-            user_id INTEGER NOT NULL,
-            target_ids TEXT NOT NULL,
-            target_type TEXT DEFAULT 'user' CHECK(target_type IN ('user', 'role')),
-            message TEXT NOT NULL,
-            interval INTEGER NOT NULL,
-            time_unit TEXT DEFAULT 'minutes' CHECK(time_unit IN ('minutes', 'hours', 'days')),
-            last_ping TIMESTAMP,
-            next_ping TIMESTAMP NOT NULL,
-            dm BOOLEAN DEFAULT false,
-            active BOOLEAN DEFAULT true,
-            recurring BOOLEAN DEFAULT true,
-            ghost_ping BOOLEAN DEFAULT false,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
-        )
-    ''')
-    
-    # Add ghost_ping column if it doesn't exist
-    try:
-        await db.execute('ALTER TABLE reminders ADD COLUMN ghost_ping BOOLEAN DEFAULT false')
-    except sqlite3.OperationalError:
-        # Column already exists
-        pass
+    # First, check if we need to add the ghost_ping column
+    async with db.execute("PRAGMA table_info(reminders)") as cursor:
+        columns = await cursor.fetchall()
+        has_ghost_ping = any(col[1] == 'ghost_ping' for col in columns)
+
+    if not has_ghost_ping:
+        logger.info("Adding ghost_ping column to reminders table...")
+        try:
+            # Create a backup of the old table
+            await db.execute('''
+                CREATE TABLE reminders_backup AS SELECT * FROM reminders
+            ''')
+            
+            # Drop the old table
+            await db.execute('DROP TABLE reminders')
+            
+            # Create the new table with all columns
+            await db.execute('''
+                CREATE TABLE reminders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    channel_id INTEGER,
+                    user_id INTEGER NOT NULL,
+                    target_ids TEXT NOT NULL,
+                    target_type TEXT DEFAULT 'user' CHECK(target_type IN ('user', 'role')),
+                    message TEXT NOT NULL,
+                    interval INTEGER NOT NULL,
+                    time_unit TEXT DEFAULT 'minutes' CHECK(time_unit IN ('minutes', 'hours', 'days')),
+                    last_ping TIMESTAMP,
+                    next_ping TIMESTAMP NOT NULL,
+                    dm BOOLEAN DEFAULT false,
+                    active BOOLEAN DEFAULT true,
+                    recurring BOOLEAN DEFAULT true,
+                    ghost_ping BOOLEAN DEFAULT false,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+                )
+            ''')
+            
+            # Copy data from backup to new table
+            await db.execute('''
+                INSERT INTO reminders (
+                    id, guild_id, channel_id, user_id, target_ids, target_type,
+                    message, interval, time_unit, last_ping, next_ping,
+                    dm, active, recurring, created_at
+                )
+                SELECT 
+                    id, guild_id, channel_id, user_id, target_ids, target_type,
+                    message, interval, time_unit, last_ping, next_ping,
+                    dm, active, recurring, created_at
+                FROM reminders_backup
+            ''')
+            
+            # Drop the backup table
+            await db.execute('DROP TABLE reminders_backup')
+            
+            await db.commit()
+            logger.info("Successfully added ghost_ping column")
+        except Exception as e:
+            logger.error(f"Error adding ghost_ping column: {str(e)}")
+            # Try to restore from backup if something went wrong
+            try:
+                await db.execute('DROP TABLE IF EXISTS reminders')
+                await db.execute('ALTER TABLE reminders_backup RENAME TO reminders')
+                await db.commit()
+                logger.info("Restored from backup after error")
+            except Exception as restore_error:
+                logger.error(f"Failed to restore from backup: {str(restore_error)}")
+            raise
+    else:
+        # Create the table if it doesn't exist
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER,
+                user_id INTEGER NOT NULL,
+                target_ids TEXT NOT NULL,
+                target_type TEXT DEFAULT 'user' CHECK(target_type IN ('user', 'role')),
+                message TEXT NOT NULL,
+                interval INTEGER NOT NULL,
+                time_unit TEXT DEFAULT 'minutes' CHECK(time_unit IN ('minutes', 'hours', 'days')),
+                last_ping TIMESTAMP,
+                next_ping TIMESTAMP NOT NULL,
+                dm BOOLEAN DEFAULT false,
+                active BOOLEAN DEFAULT true,
+                recurring BOOLEAN DEFAULT true,
+                ghost_ping BOOLEAN DEFAULT false,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
+            )
+        ''')
     
     await db.execute('''
         CREATE TABLE IF NOT EXISTS guild_settings (
