@@ -345,7 +345,7 @@ async def set_channel(
     )
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="addreminder", description="Add a new reminder with timezone support")
+@bot.tree.command(name="addping", description="Add a new ping reminder")
 @app_commands.describe(
     targets="Users/Roles to remind (mention them or use IDs)",
     time="When to send the reminder (e.g., '3pm', '15:00', 'tomorrow 2pm')",
@@ -354,7 +354,7 @@ async def set_channel(
     channel="Channel to send reminder (optional)",
     recurring="Whether this reminder should repeat daily"
 )
-async def add_reminder(
+async def add_ping(
     interaction: discord.Interaction,
     targets: str,
     time: str,
@@ -606,7 +606,7 @@ async def use_template(
             return
 
         # Create the reminder using the template
-        await add_reminder(
+        await add_ping(
             interaction=interaction,
             targets=final_targets,
             time=final_time,
@@ -726,7 +726,8 @@ async def help_command(
     interaction: discord.Interaction,
     command: Optional[Literal[
         'addping', 'editping', 'removeping', 'listpings',
-        'setchannel', 'settimezone', 'savetemplate', 'usetemplate'
+        'setchannel', 'settimezone', 'savetemplate', 'usetemplate',
+        'pauseping', 'pauseall', 'resumeping', 'schedule'
     ]] = None
 ):
     if command:
@@ -739,21 +740,21 @@ async def help_command(
             ).add_field(
                 name="Usage",
                 value=(
-                    "`/addping targets:<@users/roles> interval:<number> "
-                    "time_unit:[minutes/hours/days] message:<text>`\n"
-                    "Optional: `is_dm:True/False channel:#channel "
-                    "is_recurring:True/False`"
+                    "`/addping targets:@users/roles time:3pm "
+                    "message:your message`\n"
+                    "Optional: `dm:True/False channel:#channel "
+                    "recurring:True/False`"
                 ),
                 inline=False
             ).add_field(
                 name="Examples",
                 value=(
-                    "1. `/addping targets:@user interval:30 time_unit:minutes "
+                    "1. `/addping targets:@user time:3pm "
                     "message:Time for a break!`\n"
-                    "2. `/addping targets:@role interval:1 time_unit:days "
-                    "message:Daily reminder channel:#announcements`\n"
-                    "3. `/addping targets:@user interval:2 time_unit:hours "
-                    "is_dm:True message:Take your medicine`"
+                    "2. `/addping targets:@role time:9am "
+                    "message:Daily reminder channel:#announcements recurring:true`\n"
+                    "3. `/addping targets:@user time:2pm "
+                    "dm:true message:Take your medicine`"
                 ),
                 inline=False
             ),
@@ -767,19 +768,18 @@ async def help_command(
                 value=(
                     "`/editping reminder_id:<number>`\n"
                     "Optional parameters to change:\n"
-                    "- `interval` and `time_unit`\n"
+                    "- `time`\n"
                     "- `message`\n"
                     "- `channel`\n"
-                    "- `is_dm`\n"
-                    "- `active`\n"
-                    "- `is_recurring`"
+                    "- `dm`\n"
+                    "- `recurring`"
                 ),
                 inline=False
             ).add_field(
                 name="Examples",
                 value=(
-                    "1. `/editping reminder_id:1 interval:45 time_unit:minutes`\n"
-                    "2. `/editping reminder_id:2 active:false`\n"
+                    "1. `/editping reminder_id:1 time:3:45pm`\n"
+                    "2. `/editping reminder_id:2 recurring:false`\n"
                     "3. `/editping reminder_id:3 message:New reminder message`"
                 ),
                 inline=False
@@ -825,6 +825,42 @@ async def help_command(
                     "- Option to cancel deletion"
                 ),
                 inline=False
+            ),
+
+            'pauseping': discord.Embed(
+                title="⏸️ Pause Ping Command",
+                description="Temporarily pause a reminder",
+                color=discord.Color.blue()
+            ).add_field(
+                name="Usage",
+                value="`/pauseping [reminder_id:<number>]`",
+                inline=False
+            ).add_field(
+                name="Features",
+                value=(
+                    "- Can select reminder from a list if ID not provided\n"
+                    "- Keeps the reminder but stops it from triggering\n"
+                    "- Can be resumed later with /resumeping"
+                ),
+                inline=False
+            ),
+
+            'resumeping': discord.Embed(
+                title="▶️ Resume Ping Command",
+                description="Resume a paused reminder",
+                color=discord.Color.blue()
+            ).add_field(
+                name="Usage",
+                value="`/resumeping [reminder_id:<number>]`",
+                inline=False
+            ).add_field(
+                name="Features",
+                value=(
+                    "- Can select reminder from a list if ID not provided\n"
+                    "- Recalculates next ping time based on interval\n"
+                    "- Restores normal reminder operation"
+                ),
+                inline=False
             )
         }
 
@@ -842,10 +878,10 @@ async def help_command(
     embed.add_field(
         name="📌 Core Features",
         value=(
-            "• Ping users or roles\n"
+            "• Ping users or roles at specified times\n"
             "• One-time or recurring reminders\n"
             "• DM or channel messages\n"
-            "• Flexible time intervals\n"
+            "• Flexible time scheduling\n"
             "• Template system"
         ),
         inline=False
@@ -859,6 +895,10 @@ async def help_command(
             "`/listpings` - View all reminders\n"
             "`/editping` - Modify reminder\n"
             "`/removeping` - Delete reminder\n"
+            "`/pauseping` - Pause a reminder\n"
+            "`/resumeping` - Resume a reminder\n"
+            "`/pauseall` - Pause all reminders\n"
+            "`/schedule` - View upcoming reminders\n"
             "`/setchannel` - Set default channel\n"
             "`/settimezone` - Set server timezone\n"
             "`/savetemplate` - Save reminder template\n"
@@ -871,7 +911,7 @@ async def help_command(
     embed.add_field(
         name="💡 Tips",
         value=(
-            "• Use categories to organize reminders\n"
+            "• Use `/addping` with time like '3pm' or 'tomorrow 2pm'\n"
             "• Create templates for common reminders\n"
             "• Set a default channel for convenience\n"
             "• Use the timezone setting for accurate timing"
