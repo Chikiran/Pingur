@@ -827,6 +827,72 @@ async def list_templates(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
+class ListView(discord.ui.View):
+    def __init__(self, reminders, timezone, type):
+        super().__init__(timeout=300)
+        self.reminders = reminders
+        self.timezone = timezone
+        self.type = type
+        self.page = 0
+        self.max_pages = math.ceil(len(reminders) / ITEMS_PER_PAGE)
+        self.update_button_states()
+
+    def update_button_states(self):
+        # Update Previous button state
+        self.prev_button.disabled = self.page <= 0
+        # Update Next button state
+        self.next_button.disabled = self.page >= self.max_pages - 1
+
+    def get_embed(self) -> discord.Embed:
+        start_idx = self.page * ITEMS_PER_PAGE
+        end_idx = min(start_idx + ITEMS_PER_PAGE, len(self.reminders))
+        current_reminders = self.reminders[start_idx:end_idx]
+
+        embed = discord.Embed(
+            title=f"📋 {'Pings' if self.type == 'pings' else 'Reminders'} List",
+            description=f"Page {self.page + 1}/{self.max_pages}",
+            color=discord.Color.blue()
+        )
+
+        for reminder in current_reminders:
+            rid, guild_id, channel_id, user_id, target_ids, target_type, msg, interval, time_unit, last_ping, next_ping, dm, active, recurring, created_at = reminder
+            
+            # Format the next ping time
+            next_ping_dt = datetime.fromisoformat(next_ping)
+            next_ping_str = f"<t:{int(next_ping_dt.timestamp())}:R>"
+
+            # Format the interval
+            if recurring:
+                interval_str = f"Every {interval} {time_unit}"
+            else:
+                interval_str = "One-time"
+
+            # Format status
+            status = "🟢 Active" if active else "🔴 Inactive"
+
+            embed.add_field(
+                name=f"#{rid} - {status}",
+                value=f"⏰ Next: {next_ping_str}\n📅 {interval_str}\n💬 {msg[:100]}{'...' if len(msg) > 100 else ''}",
+                inline=False
+            )
+
+        if not current_reminders:
+            embed.description = f"No {'pings' if self.type == 'pings' else 'reminders'} found."
+
+        return embed
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.gray, emoji="◀️")
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = max(0, self.page - 1)
+        self.update_button_states()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.gray, emoji="▶️")
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = min(self.max_pages - 1, self.page + 1)
+        self.update_button_states()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
 @bot.tree.command(name="list", description="View upcoming reminders in chronological order")
 @app_commands.describe(
     type="Type of items to list (pings or reminders)"
