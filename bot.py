@@ -1069,11 +1069,12 @@ async def check_reminders():
                             mentions = ' '.join(target.mention for target in targets)
                             sent_message = await channel.send(f'{mentions} {message}')
                             
-                            # If this is a ghost ping, delete it immediately
-                            if ghost_ping:
+                            # Only delete if this is a ghost ping
+                            if ghost_ping and sent_message:  # Make sure message was sent successfully
                                 try:
                                     await asyncio.sleep(0.1)  # Brief delay to ensure the ping goes through
                                     await sent_message.delete()
+                                    logger.info(f"Successfully deleted ghost ping message for reminder {id}")
                                 except Exception as e:
                                     logger.error(f'Failed to delete ghost ping message: {str(e)}')
 
