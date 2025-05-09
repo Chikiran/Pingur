@@ -836,7 +836,7 @@ async def list_reminders(
     type: Literal['pings', 'reminders'] = 'pings'
 ):
     try:
-        await interaction.response.defer()  # Defer the response since this might take a while
+        await interaction.response.defer()
         
         async with aiosqlite.connect(DB_PATH) as db:
             # Get timezone
@@ -863,100 +863,8 @@ async def list_reminders(
             )
             return
 
-        tz = pytz.timezone(timezone)
-        now = datetime.now(tz)
-
-        # Create paginated view
-        class ListView(discord.ui.View):
-            def __init__(self):
-                super().__init__(timeout=300)
-                self.page = 0
-                self.max_pages = math.ceil(len(reminders) / ITEMS_PER_PAGE)
-
-            @discord.ui.button(label="Previous", style=discord.ButtonStyle.gray, emoji="◀️", disabled=True)
-            async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-                self.page = max(0, self.page - 1)
-                await self.update_view(interaction)
-
-            @discord.ui.button(label="Next", style=discord.ButtonStyle.gray, emoji="▶️")
-            async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-                self.page = min(self.max_pages - 1, self.page + 1)
-                await self.update_view(interaction)
-
-            async def update_view(self, interaction: discord.Interaction):
-                try:
-                    # Update button states
-                    self.prev_button.disabled = self.page == 0
-                    self.next_button.disabled = self.page >= self.max_pages - 1
-
-                    # Create embed for current page
-                    start_idx = self.page * ITEMS_PER_PAGE
-                    page_reminders = reminders[start_idx:start_idx + ITEMS_PER_PAGE]
-
-                    embed = discord.Embed(
-                        title=f"📅 {'Pings' if type == 'pings' else 'Reminders'}",
-                        description=f"Page {self.page + 1} of {self.max_pages}\nServer timezone: {timezone}",
-                        color=discord.Color.blue()
-                    )
-
-                    # Create table-like format
-                    rows = []
-                    for reminder in page_reminders:
-                        rid, _, channel_id, _, target_ids, target_type, msg, interval, time_unit, _, next_ping, dm, active, recurring, _ = reminder
-                        
-                        # Get targets
-                        targets = []
-                        for tid in target_ids.split(','):
-                            if target_type == 'user':
-                                target = interaction.guild.get_member(int(tid))
-                            else:
-                                target = interaction.guild.get_role(int(tid))
-                            if target:
-                                targets.append(target.mention)
-
-                        # Get channel
-                        channel = interaction.guild.get_channel(channel_id) if channel_id else None
-                        
-                        # Format next ping time
-                        try:
-                            next_time = datetime.fromisoformat(next_ping)
-                            if next_time.tzinfo is None:
-                                next_time = pytz.utc.localize(next_time)
-                            next_time = next_time.astimezone(tz)
-                            time_str = next_time.strftime('%I:%M %p')
-                        except ValueError:
-                            time_str = "Invalid time"
-
-                        status = "🟢" if active else "🔴"
-                        if dm:
-                            location = "📱 DM"
-                        else:
-                            location = "📢 Unknown"
-                            if channel:
-                                location = f"📢 {channel.mention}"
-                        
-                        rows.append(
-                            f"**#{rid}** | {status} | {time_str} | {location}\n"
-                            f"To: {', '.join(targets) or 'No targets'}\n"
-                            f"Message: {msg}\n"
-                            f"{'─' * 40}"
-                        )
-
-                    embed.description += "\n\n" + "\n".join(rows)
-                    
-                    # For button updates, use message.edit
-                    await interaction.message.edit(embed=embed, view=self)
-                except Exception as e:
-                    logger.error(f"Error in list view update: {str(e)}")
-                    traceback.print_exc()
-                    await interaction.response.send_message(
-                        "An error occurred while updating the list. Please try again.",
-                        ephemeral=True
-                    )
-
-        view = ListView()
-        initial_embed = await view.update_view(interaction)
-        await interaction.followup.send(embed=initial_embed, view=view)
+        view = ListView(reminders, timezone, type)
+        await interaction.followup.send(embed=view.get_embed(), view=view)
     except Exception as e:
         logger.error(f"Error in list command: {str(e)}")
         traceback.print_exc()
