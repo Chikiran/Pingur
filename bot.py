@@ -352,13 +352,13 @@ async def set_channel(
     time_unit="Time unit (minutes/hours/days)",
     message="Message to send with the ping",
     dm="Send as DM instead of channel message (only for users)",
-    channel="Channel to send ping (optional)"
+    channel="Channel to send ping (optional, uses current channel if not specified)"
 )
 async def add_ping(
     interaction: discord.Interaction,
     targets: str,
     interval: int,
-    time_unit: Literal['minutes', 'hours', 'days'],
+    time_unit: Literal['minutes', 'hours', 'days'] = 'minutes',  # Default to minutes
     message: str,
     dm: bool = False,
     channel: Optional[discord.TextChannel] = None
@@ -501,18 +501,18 @@ async def add_ping(
 @bot.tree.command(name="addreminder", description="Add a time-based reminder (e.g., daily at 3pm)")
 @app_commands.describe(
     targets="Users/Roles to remind (mention them or use IDs)",
-    time="When to send the reminder (e.g., '3pm', '15:00')",
-    repeat="How often to repeat the reminder",
+    time="When to send the reminder (e.g., '3pm', '15:00', 'tomorrow 3pm')",
     message="Message to send with the reminder",
+    repeat="How often to repeat the reminder",
     dm="Send as DM instead of channel message (only for users)",
-    channel="Channel to send reminder (optional)"
+    channel="Channel to send reminder (optional, uses current channel if not specified)"
 )
 async def add_reminder(
     interaction: discord.Interaction,
     targets: str,
     time: str,
-    repeat: Literal['never', 'daily', 'weekly'],
     message: str,
+    repeat: Literal['never', 'daily', 'weekly'] = 'never',  # Default to one-time reminder
     dm: bool = False,
     channel: Optional[discord.TextChannel] = None
 ):
@@ -1076,6 +1076,470 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         traceback.print_exc()
         await interaction.response.send_message(
             "An error occurred while processing your command. Please try again later.",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="help", description="Show detailed help information")
+@app_commands.describe(
+    command="Get detailed help for a specific command"
+)
+async def help_command(
+    interaction: discord.Interaction,
+    command: Optional[Literal[
+        'addping', 'editping', 'removeping', 'list',
+        'setchannel', 'settimezone', 'savetemplate', 'usetemplate',
+        'pauseping', 'pauseall', 'resumeping'
+    ]] = None
+):
+    if command:
+        # Detailed help for specific command
+        embeds = {
+            'addping': discord.Embed(
+                title="📌 Add Ping Command",
+                description="Create an interval-based ping that repeats at fixed intervals",
+                color=discord.Color.blue()
+            ).add_field(
+                name="Usage",
+                value=(
+                    "`/addping targets:@users/roles interval:number time_unit:[minutes/hours/days] "
+                    "message:your message`\n"
+                    "Optional: `dm:True/False channel:#channel`"
+                ),
+                inline=False
+            ).add_field(
+                name="Examples",
+                value=(
+                    "1. `/addping targets:@user interval:30 time_unit:minutes "
+                    "message:Time for a break!`\n"
+                    "2. `/addping targets:@role interval:2 time_unit:hours "
+                    "message:Status update? channel:#team-chat`\n"
+                    "3. `/addping targets:@user interval:1 time_unit:days "
+                    "dm:true message:Daily medication reminder`"
+                ),
+                inline=False
+            ),
+            
+            'list': discord.Embed(
+                title="📋 List Command",
+                description="View all active reminders in chronological order",
+                color=discord.Color.blue()
+            ).add_field(
+                name="Usage",
+                value=(
+                    "`/list`\n"
+                    "Optional: `show_all:True` to include inactive reminders"
+                ),
+                inline=False
+            ).add_field(
+                name="Features",
+                value=(
+                    "- Shows upcoming reminders in order\n"
+                    "- Displays time until next ping\n"
+                    "- Shows reminder status and type\n"
+                    "- Navigate pages with buttons"
+                ),
+                inline=False
+            ),
+            # ... keep other command help entries ...
+        }
+
+        if command in embeds:
+            await interaction.response.send_message(embed=embeds[command])
+            return
+
+    # General help
+    embed = discord.Embed(
+        title="🤖 Pingur Bot Commands",
+        color=discord.Color.blue()
+    )
+
+    # Commands Overview
+    embed.add_field(
+        name="⚡ Available Commands",
+        value=(
+            "`/addping` - Create interval-based ping\n"
+            "`/addreminder` - Create time-based reminder\n"
+            "`/list` - View all reminders\n"
+            "`/editping` - Modify reminder\n"
+            "`/removeping` - Delete reminder\n"
+            "`/pauseping` - Pause a reminder\n"
+            "`/resumeping` - Resume a reminder\n"
+            "`/pauseall` - Pause all reminders\n"
+            "`/setchannel` - Set default channel\n"
+            "`/settimezone` - Set server timezone\n"
+            "`/savetemplate` - Save reminder template\n"
+            "`/usetemplate` - Use saved template"
+        ),
+        inline=False
+    )
+
+    # Tips
+    embed.add_field(
+        name="💡 Tips",
+        value=(
+            "• Use `/addping` for interval-based pings (every X minutes/hours)\n"
+            "• Use `/addreminder` for time-based reminders (daily at 3pm)\n"
+            "• Create templates for common reminders\n"
+            "• Set a default channel for convenience\n"
+            "• Use the timezone setting for accurate timing"
+        ),
+        inline=False
+    )
+
+    # Get detailed help
+    embed.add_field(
+        name="📚 Detailed Help",
+        value="Use `/help command:<command>` for detailed information about a specific command",
+        inline=False
+    )
+
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="settimezone", description="Set the timezone for this server")
+@app_commands.describe(
+    timezone="The timezone (e.g., 'US/Pacific', 'Europe/London', 'Asia/Tokyo')"
+)
+async def set_timezone(
+    interaction: discord.Interaction,
+    timezone: str
+):
+    try:
+        # Validate timezone
+        pytz.timezone(timezone)
+        
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute('''
+                INSERT INTO guild_settings (guild_id, timezone)
+                VALUES (?, ?)
+                ON CONFLICT(guild_id) 
+                DO UPDATE SET timezone = excluded.timezone
+            ''', (interaction.guild_id, timezone))
+            await db.commit()
+
+        embed = discord.Embed(
+            title="✅ Timezone Set",
+            description=f"Server timezone set to `{timezone}`",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed)
+    except pytz.exceptions.UnknownTimeZoneError:
+        embed = discord.Embed(
+            title="❌ Invalid Timezone",
+            description="Please use a valid timezone name. Examples:\n" +
+                       "• `US/Pacific`\n• `US/Eastern`\n• `Europe/London`\n" +
+                       "• `Asia/Tokyo`\n• `Australia/Sydney`",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="pauseping", description="Pause a reminder temporarily")
+@app_commands.describe(
+    reminder_id="ID of the reminder to pause"
+)
+async def pause_ping(
+    interaction: discord.Interaction,
+    reminder_id: Optional[int] = None
+):
+    if reminder_id is None:
+        # Show reminder selector
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('SELECT * FROM reminders WHERE guild_id = ? AND active = 1', 
+                                (interaction.guild_id,)) as cursor:
+                reminders = await cursor.fetchall()
+                
+        if not reminders:
+            await interaction.response.send_message('❌ No active reminders found!', ephemeral=True)
+            return
+
+        view = ReminderSelectView(reminders, "pause")
+        await interaction.response.send_message(
+            "Select a reminder to pause:",
+            view=view,
+            ephemeral=True
+        )
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Check if reminder exists and is active
+        async with db.execute('SELECT * FROM reminders WHERE id = ? AND guild_id = ?', 
+                            (reminder_id, interaction.guild_id)) as cursor:
+            reminder = await cursor.fetchone()
+
+        if not reminder:
+            await interaction.response.send_message('❌ Reminder not found!', ephemeral=True)
+            return
+
+        if not reminder[12]:  # active status
+            await interaction.response.send_message('❌ Reminder is already paused!', ephemeral=True)
+            return
+
+        # Pause the reminder
+        await db.execute('UPDATE reminders SET active = 0 WHERE id = ?', (reminder_id,))
+        await db.commit()
+
+        embed = await create_reminder_embed(interaction, reminder)
+        embed.title = "⏸️ Reminder Paused"
+        await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="pauseall", description="Pause all reminders in this server")
+async def pause_all(interaction: discord.Interaction):
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Get count of active reminders
+        async with db.execute('SELECT COUNT(*) FROM reminders WHERE guild_id = ? AND active = 1', 
+                            (interaction.guild_id,)) as cursor:
+            count = (await cursor.fetchone())[0]
+
+        if count == 0:
+            await interaction.response.send_message('❌ No active reminders found!', ephemeral=True)
+            return
+
+        # Create confirmation view
+        class ConfirmView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60)
+
+            @discord.ui.button(label=f"Pause {count} Reminders", style=discord.ButtonStyle.danger)
+            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute('UPDATE reminders SET active = 0 WHERE guild_id = ? AND active = 1',
+                                   (interaction.guild_id,))
+                    await db.commit()
+
+                embed = discord.Embed(
+                    title="⏸️ All Reminders Paused",
+                    description=f"Paused {count} reminders",
+                    color=discord.Color.orange()
+                )
+                await interaction.response.edit_message(embed=embed, view=None)
+
+            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
+            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                embed = discord.Embed(
+                    title="❌ Operation Cancelled",
+                    description="No reminders were paused",
+                    color=discord.Color.red()
+                )
+                await interaction.response.edit_message(embed=embed, view=None)
+
+        embed = discord.Embed(
+            title="⚠️ Confirm Action",
+            description=f"Are you sure you want to pause all {count} active reminders?",
+            color=discord.Color.yellow()
+        )
+        await interaction.response.send_message(embed=embed, view=ConfirmView())
+
+@bot.tree.command(name="resumeping", description="Resume a paused reminder")
+@app_commands.describe(
+    reminder_id="ID of the reminder to resume"
+)
+async def resume_ping(
+    interaction: discord.Interaction,
+    reminder_id: Optional[int] = None
+):
+    if reminder_id is None:
+        # Show reminder selector
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('SELECT * FROM reminders WHERE guild_id = ? AND active = 0', 
+                                (interaction.guild_id,)) as cursor:
+                reminders = await cursor.fetchall()
+                
+        if not reminders:
+            await interaction.response.send_message('❌ No paused reminders found!', ephemeral=True)
+            return
+
+        view = ReminderSelectView(reminders, "resume")
+        await interaction.response.send_message(
+            "Select a reminder to resume:",
+            view=view,
+            ephemeral=True
+        )
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Check if reminder exists and is paused
+        async with db.execute('SELECT * FROM reminders WHERE id = ? AND guild_id = ?', 
+                            (reminder_id, interaction.guild_id)) as cursor:
+            reminder = await cursor.fetchone()
+
+        if not reminder:
+            await interaction.response.send_message('❌ Reminder not found!', ephemeral=True)
+            return
+
+        if reminder[12]:  # active status
+            await interaction.response.send_message('❌ Reminder is already active!', ephemeral=True)
+            return
+
+        # Calculate next ping time
+        now = datetime.now()
+        interval_minutes = reminder[7] * TIME_UNITS[reminder[8]]  # interval * unit multiplier
+        next_ping = now + timedelta(minutes=interval_minutes)
+
+        # Resume the reminder
+        await db.execute('''
+            UPDATE reminders 
+            SET active = 1, next_ping = ? 
+            WHERE id = ?
+        ''', (next_ping.isoformat(), reminder_id))
+        await db.commit()
+
+        embed = await create_reminder_embed(interaction, reminder)
+        embed.title = "▶️ Reminder Resumed"
+        await interaction.response.send_message(embed=embed)
+
+class ReminderSelectView(discord.ui.View):
+    def __init__(self, reminders, action):
+        super().__init__(timeout=60)
+        self.reminders = reminders
+        self.action = action
+        
+        # Create select menu with reminders
+        select = discord.ui.Select(
+            placeholder=f"Choose a reminder to {action}",
+            options=[
+                discord.SelectOption(
+                    label=f"Reminder #{r[0]}",
+                    description=f"{r[6][:50]}...",  # First 50 chars of message
+                    value=str(r[0])
+                ) for r in reminders[:25]  # Discord limit of 25 options
+            ]
+        )
+        
+        async def select_callback(interaction: discord.Interaction):
+            reminder_id = int(select.values[0])
+            if self.action == "pause":
+                await pause_ping(interaction, reminder_id)
+            else:  # resume
+                await resume_ping(interaction, reminder_id)
+        
+        select.callback = select_callback
+        self.add_item(select)
+
+@bot.tree.command(name="removeping", description="Delete a reminder")
+@app_commands.describe(
+    reminder_id="ID of the reminder to delete (optional, will show a selection if not provided)"
+)
+async def remove_ping(
+    interaction: discord.Interaction,
+    reminder_id: Optional[int] = None
+):
+    if reminder_id is None:
+        # Show reminder selector
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('SELECT * FROM reminders WHERE guild_id = ?', 
+                                (interaction.guild_id,)) as cursor:
+                reminders = await cursor.fetchall()
+                
+        if not reminders:
+            await interaction.response.send_message('❌ No reminders found!', ephemeral=True)
+            return
+
+        # Create select menu with reminders
+        select = discord.ui.Select(
+            placeholder="Choose a reminder to delete",
+            options=[
+                discord.SelectOption(
+                    label=f"Reminder #{r[0]}",
+                    description=f"{r[6][:50]}...",  # First 50 chars of message
+                    value=str(r[0])
+                ) for r in reminders[:25]  # Discord limit of 25 options
+            ]
+        )
+        
+        class DeleteView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60)
+                self.add_item(select)
+            
+            async def handle_delete(self, interaction: discord.Interaction, rid: int):
+                async with aiosqlite.connect(DB_PATH) as db:
+                    # Get reminder details first
+                    async with db.execute('SELECT * FROM reminders WHERE id = ? AND guild_id = ?', 
+                                        (rid, interaction.guild_id)) as cursor:
+                        reminder = await cursor.fetchone()
+                        
+                    if not reminder:
+                        await interaction.response.send_message('❌ Reminder not found!', ephemeral=True)
+                        return
+                    
+                    # Delete the reminder
+                    await db.execute('DELETE FROM reminders WHERE id = ?', (rid,))
+                    await db.commit()
+                    
+                    embed = discord.Embed(
+                        title="✅ Reminder Deleted",
+                        description=f"Reminder #{rid} has been deleted",
+                        color=discord.Color.red()
+                    )
+                    await interaction.response.edit_message(embed=embed, view=None)
+
+            @discord.ui.button(label="Confirm Delete", style=discord.ButtonStyle.danger)
+            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                rid = int(select.values[0])
+                await self.handle_delete(interaction, rid)
+            
+            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
+            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                embed = discord.Embed(
+                    title="❌ Operation Cancelled",
+                    description="No reminders were deleted",
+                    color=discord.Color.green()
+                )
+                await interaction.response.edit_message(embed=embed, view=None)
+
+        view = DeleteView()
+        await interaction.response.send_message(
+            "Select a reminder to delete:",
+            view=view,
+            ephemeral=True
+        )
+        return
+
+    # Direct deletion with ID
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Get reminder details first
+        async with db.execute('SELECT * FROM reminders WHERE id = ? AND guild_id = ?', 
+                            (reminder_id, interaction.guild_id)) as cursor:
+            reminder = await cursor.fetchone()
+            
+        if not reminder:
+            await interaction.response.send_message('❌ Reminder not found!', ephemeral=True)
+            return
+        
+        # Create confirmation view
+        class ConfirmView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60)
+
+            @discord.ui.button(label="Delete Reminder", style=discord.ButtonStyle.danger)
+            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute('DELETE FROM reminders WHERE id = ?', (reminder_id,))
+                    await db.commit()
+
+                embed = discord.Embed(
+                    title="✅ Reminder Deleted",
+                    description=f"Reminder #{reminder_id} has been deleted",
+                    color=discord.Color.red()
+                )
+                await interaction.response.edit_message(embed=embed, view=None)
+
+            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
+            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                embed = discord.Embed(
+                    title="❌ Operation Cancelled",
+                    description="No reminders were deleted",
+                    color=discord.Color.green()
+                )
+                await interaction.response.edit_message(embed=embed, view=None)
+
+        # Show reminder details and confirmation
+        embed = await create_reminder_embed(interaction, reminder)
+        embed.title = "⚠️ Confirm Deletion"
+        embed.description = "Are you sure you want to delete this reminder?"
+        
+        await interaction.response.send_message(
+            embed=embed,
+            view=ConfirmView(),
             ephemeral=True
         )
 
