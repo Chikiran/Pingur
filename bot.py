@@ -230,16 +230,16 @@ async def setup_database(db):
                     time_unit TEXT DEFAULT 'minutes' CHECK(time_unit IN ('minutes', 'hours', 'days')),
                     last_ping TIMESTAMP,
                     next_ping TIMESTAMP NOT NULL,
-                    dm BOOLEAN DEFAULT false,
-                    active BOOLEAN DEFAULT true,
-                    recurring BOOLEAN DEFAULT true,
-                    ghost_ping BOOLEAN DEFAULT false,
+                    dm INTEGER DEFAULT 0 CHECK(dm IN (0, 1)),
+                    active INTEGER DEFAULT 1 CHECK(active IN (0, 1)),
+                    recurring INTEGER DEFAULT 1 CHECK(recurring IN (0, 1)),
+                    ghost_ping INTEGER DEFAULT 0 CHECK(ghost_ping IN (0, 1)),
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
                 )
             ''')
             
-            # Copy data from backup to new table, explicitly setting ghost_ping to false
+            # Copy data from backup to new table, explicitly setting ghost_ping to 0
             await db.execute('''
                 INSERT INTO reminders (
                     id, guild_id, channel_id, user_id, target_ids, target_type,
@@ -249,15 +249,19 @@ async def setup_database(db):
                 SELECT 
                     id, guild_id, channel_id, user_id, target_ids, target_type,
                     message, interval, time_unit, last_ping, next_ping,
-                    dm, active, recurring, 0, created_at
+                    CASE WHEN dm = 1 THEN 1 ELSE 0 END,
+                    CASE WHEN active = 1 THEN 1 ELSE 0 END,
+                    CASE WHEN recurring = 1 THEN 1 ELSE 0 END,
+                    0,
+                    created_at
                 FROM reminders_backup
             ''')
             
             # Drop the backup table
             await db.execute('DROP TABLE reminders_backup')
             
-            # Update any existing reminders to ensure ghost_ping is false
-            await db.execute('UPDATE reminders SET ghost_ping = 0 WHERE ghost_ping IS NULL')
+            # Update any existing reminders to ensure ghost_ping is 0
+            await db.execute('UPDATE reminders SET ghost_ping = 0 WHERE ghost_ping IS NULL OR ghost_ping != 1')
             
             await db.commit()
             logger.info("Successfully added ghost_ping column and migrated data")
@@ -287,14 +291,20 @@ async def setup_database(db):
                 time_unit TEXT DEFAULT 'minutes' CHECK(time_unit IN ('minutes', 'hours', 'days')),
                 last_ping TIMESTAMP,
                 next_ping TIMESTAMP NOT NULL,
-                dm BOOLEAN DEFAULT false,
-                active BOOLEAN DEFAULT true,
-                recurring BOOLEAN DEFAULT true,
-                ghost_ping BOOLEAN DEFAULT false,
+                dm INTEGER DEFAULT 0 CHECK(dm IN (0, 1)),
+                active INTEGER DEFAULT 1 CHECK(active IN (0, 1)),
+                recurring INTEGER DEFAULT 1 CHECK(recurring IN (0, 1)),
+                ghost_ping INTEGER DEFAULT 0 CHECK(ghost_ping IN (0, 1)),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
             )
         ''')
+    
+    # Fix any inconsistent boolean values in the database
+    await db.execute('UPDATE reminders SET ghost_ping = 0 WHERE ghost_ping IS NULL OR ghost_ping != 1')
+    await db.execute('UPDATE reminders SET dm = CASE WHEN dm = 1 THEN 1 ELSE 0 END')
+    await db.execute('UPDATE reminders SET active = CASE WHEN active = 1 THEN 1 ELSE 0 END')
+    await db.execute('UPDATE reminders SET recurring = CASE WHEN recurring = 1 THEN 1 ELSE 0 END')
     
     await db.execute('''
         CREATE TABLE IF NOT EXISTS guild_settings (
@@ -564,7 +574,7 @@ async def add_ping(
             next_ping = tz.localize(next_ping)
         next_ping = next_ping.astimezone(pytz.utc)
 
-        # Insert the reminder
+        # Insert the reminder with explicit boolean values
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute('''
                 INSERT INTO reminders (
@@ -581,13 +591,13 @@ async def add_ping(
                 target_type,
                 message,
                 interval,
-                'minutes',
-                now.isoformat(),
+                time_unit,
+                now.astimezone(pytz.utc).isoformat(),  # Store in UTC
                 next_ping.isoformat(),
-                dm,
-                True,  # Always recurring for interval-based pings
-                True,
-                False  # Not a ghost ping
+                1 if dm else 0,  # Explicit integer for boolean
+                1,  # Always recurring for interval-based pings
+                1,  # Active by default
+                0   # Explicitly not a ghost ping
             ))
             await db.commit()
             
@@ -595,6 +605,9 @@ async def add_ping(
             cursor = await db.execute('SELECT last_insert_rowid()')
             row = await cursor.fetchone()
             reminder_id = row[0]
+
+            # Log the creation with all boolean values
+            logger.info(f"Created new reminder #{reminder_id} (dm={1 if dm else 0}, recurring=1, active=1, ghost_ping=0)")
 
         # Get targets for display
         targets_display = []
@@ -1113,8 +1126,13 @@ async def check_reminders():
                      message, interval, time_unit, last_ping, next_ping, is_dm, active, 
                      recurring, ghost_ping, created_at) = reminder
                     
-                    # Ensure ghost_ping is a boolean and has a default value
-                    ghost_ping = bool(ghost_ping) if ghost_ping is not None else False
+                    # Explicitly cast all boolean fields to integers first, then to booleans
+                    is_dm = bool(int(is_dm)) if is_dm is not None else False
+                    active = bool(int(active)) if active is not None else True
+                    recurring = bool(int(recurring)) if recurring is not None else True
+                    ghost_ping = bool(int(ghost_ping)) if ghost_ping is not None else False
+                    
+                    logger.info(f"Processing reminder {id} (ghost_ping={ghost_ping}, active={active}, recurring={recurring}, dm={is_dm})")
                     
                     guild = bot.get_guild(guild_id)
                     if not guild:
@@ -1140,6 +1158,7 @@ async def check_reminders():
                         if is_dm and target_type == 'user':
                             for target in targets:
                                 await target.send(f'{message}')
+                                logger.info(f"Sent DM for reminder {id} to {target.name}")
                         else:
                             channel = guild.get_channel(channel_id)
                             if channel:
@@ -1155,7 +1174,7 @@ async def check_reminders():
                                     except Exception as e:
                                         logger.error(f'Failed to delete ghost ping message for reminder {id}: {str(e)}')
                                 else:
-                                    logger.info(f"Successfully sent regular ping for reminder {id}")
+                                    logger.info(f"Regular ping message sent and kept for reminder {id}")
 
                         # Update last ping and next ping times
                         if recurring:
