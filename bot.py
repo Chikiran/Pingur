@@ -332,7 +332,7 @@ def format_time(minutes: int) -> str:
 
 async def create_reminder_embed(interaction: discord.Interaction, reminder: tuple, show_controls: bool = False) -> discord.Embed:
     """Create an embed for a reminder"""
-    rid, guild_id, channel_id, user_id, target_ids, target_type, msg, interval, time_unit, last_ping, next_ping, dm, active, recurring, created_at = reminder
+    rid, guild_id, channel_id, user_id, target_ids, target_type, msg, interval, time_unit, last_ping, next_ping, dm, active, recurring, ghost_ping, created_at = reminder
     
     embed = discord.Embed(
         title=f"Reminder #{rid}",
@@ -374,7 +374,7 @@ async def create_reminder_embed(interaction: discord.Interaction, reminder: tupl
     )
     embed.add_field(
         name="ℹ️ Details",
-        value=f"Status: {'🟢 Active' if active else '🔴 Inactive'}",
+        value=f"Status: {'🟢 Active' if active else '🔴 Inactive'}\nGhost Ping: {'👻 Yes' if ghost_ping else '🔔 No'}",
         inline=True
     )
     embed.add_field(
@@ -1008,7 +1008,7 @@ class ListView(discord.ui.View):
         )
 
         for reminder in current_reminders:
-            rid, guild_id, channel_id, user_id, target_ids, target_type, msg, interval, time_unit, last_ping, next_ping, dm, active, recurring, created_at = reminder
+            rid, guild_id, channel_id, user_id, target_ids, target_type, msg, interval, time_unit, last_ping, next_ping, dm, active, recurring, ghost_ping, created_at = reminder
             
             # Format the next ping time
             next_ping_dt = datetime.fromisoformat(next_ping)
@@ -1022,9 +1022,10 @@ class ListView(discord.ui.View):
 
             # Format status
             status = "🟢 Active" if active else "🔴 Inactive"
+            ghost = "👻" if ghost_ping else ""
 
             embed.add_field(
-                name=f"#{rid} - {status}",
+                name=f"#{rid} - {status} {ghost}",
                 value=f"⏰ Next: {next_ping_str}\n📅 {interval_str}\n💬 {msg[:100]}{'...' if len(msg) > 100 else ''}",
                 inline=False
             )
