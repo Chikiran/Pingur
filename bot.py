@@ -222,6 +222,13 @@ async def setup_database(db):
         )
     ''')
     
+    # Add ghost_ping column if it doesn't exist
+    try:
+        await db.execute('ALTER TABLE reminders ADD COLUMN ghost_ping BOOLEAN DEFAULT false')
+    except sqlite3.OperationalError:
+        # Column already exists
+        pass
+    
     await db.execute('''
         CREATE TABLE IF NOT EXISTS guild_settings (
             guild_id INTEGER PRIMARY KEY,
@@ -579,161 +586,196 @@ async def add_reminder(
     dm: bool = False,
     channel: Optional[discord.TextChannel] = None
 ):
-    # Get server timezone
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute('SELECT timezone FROM guild_settings WHERE guild_id = ?', 
-                            (interaction.guild_id,)) as cursor:
-            result = await cursor.fetchone()
-            timezone = result[0] if result else 'UTC'
-
-    tz = pytz.timezone(timezone)
-    now = datetime.now(tz)
-
     try:
-        # Parse the time string
-        if 'm' in time.lower():
-            parsed_time = datetime.strptime(time, '%I%p').time()
-        else:
-            parsed_time = datetime.strptime(time, '%H:%M').time()
+        await interaction.response.defer()
         
-        # Create timezone-aware target time
-        target_time = now.replace(hour=parsed_time.hour, minute=parsed_time.minute)
-        if target_time < now:
-            target_time += timedelta(days=1)
-            
-        # Ensure timezone-aware datetime
-        if target_time.tzinfo is None:
-            target_time = tz.localize(target_time)
-        target_time = target_time.astimezone(pytz.utc)  # Store in UTC
-    except ValueError:
-        await interaction.response.send_message(
-            "❌ Invalid time format! Examples:\n" +
-            "• `3pm` - At 3 PM\n" +
-            "• `15:00` - At 3 PM (24h format)",
-            ephemeral=True
-        )
-        return
+        # Get server timezone
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('SELECT timezone FROM guild_settings WHERE guild_id = ?', 
+                                (interaction.guild_id,)) as cursor:
+                result = await cursor.fetchone()
+                timezone = result[0] if result else 'UTC'
 
-    # Parse targets (users and roles)
-    target_ids = []
-    target_type = None
-    
-    for word in targets.split():
-        if word.startswith('<@&'):  # Role mention
-            try:
-                role_id = int(word[3:-1])
-                if not target_type:
-                    target_type = 'role'
-                elif target_type != 'role':
-                    await interaction.response.send_message(
-                        "Cannot mix users and roles in the same reminder!",
-                        ephemeral=True
-                    )
-                    return
-                target_ids.append(role_id)
-            except ValueError:
-                continue
-        elif word.startswith('<@'):  # User mention
-            try:
-                user_id = int(word[2:-1].replace('!', ''))
-                if not target_type:
-                    target_type = 'user'
-                elif target_type != 'user':
-                    await interaction.response.send_message(
-                        "Cannot mix users and roles in the same reminder!",
-                        ephemeral=True
-                    )
-                    return
-                target_ids.append(user_id)
-            except ValueError:
-                continue
+        tz = pytz.timezone(timezone)
+        now = datetime.now(tz)
 
-    if not target_ids:
-        await interaction.response.send_message(
-            "No valid targets found! Please mention users or roles.",
-            ephemeral=True
-        )
-        return
-
-    if target_type == 'role' and dm:
-        await interaction.response.send_message(
-            "Cannot send DMs to roles! Please use channel mentions for roles.",
-            ephemeral=True
-        )
-        return
-
-    # Get channel ID
-    if channel:
-        channel_id = channel.id
-    elif dm:
-        channel_id = None
-    else:
-        # First try to use the current channel
-        channel_id = interaction.channel_id
-        if not channel_id:
-            # If not in a channel, try to use the default channel
-            async with aiosqlite.connect(DB_PATH) as db:
-                async with db.execute('SELECT default_channel_id FROM guild_settings WHERE guild_id = ?', 
-                                    (interaction.guild_id,)) as cursor:
-                    result = await cursor.fetchone()
-                    channel_id = result[0] if result else None
-
-            if not channel_id:
-                await interaction.response.send_message(
-                    "No channel specified and no default channel set! Please specify a channel or use /setchannel to set a default.",
-                    ephemeral=True
-                )
-                return
-
-    # Set interval based on repeat type
-    if repeat == 'never':
-        interval = int((target_time - now).total_seconds() / 60)
-        recurring = False
-    elif repeat == 'daily':
-        interval = 1440  # 24 hours in minutes
-        recurring = True
-    else:  # weekly
-        interval = 10080  # 7 days in minutes
-        recurring = True
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('''
-            INSERT INTO reminders (
-                guild_id, channel_id, user_id, target_ids, target_type,
-                message, interval, time_unit, last_ping, next_ping,
-                dm, recurring, active
+        # Parse the time string
+        target_time = parse_time(time, tz)
+        if not target_time:
+            await interaction.followup.send(
+                "❌ Invalid time format! Examples:\n" +
+                "• `3pm` - At 3 PM\n" +
+                "• `15:00` - At 3 PM (24h format)\n" +
+                "• `tomorrow 3pm` - Tomorrow at 3 PM",
+                ephemeral=True
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            interaction.guild_id, 
-            channel_id,
-            interaction.user.id,
-            ','.join(map(str, target_ids)),
-            target_type,
-            message,
-            interval,
-            'minutes',
-            now.isoformat(),
-            target_time.isoformat(),
-            dm,
-            recurring,
-            True
-        ))
-        await db.commit()
+            return
 
-        # Fetch the newly created reminder
-        async with db.execute('SELECT * FROM reminders WHERE id = ?', (reminder_id,)) as cursor:
-            reminder = await cursor.fetchone()
+        # Parse targets (users and roles)
+        target_ids = []
+        target_type = None
+        
+        for word in targets.split():
+            target_id = None
+            is_role = False
 
-    embed = await create_reminder_embed(interaction, reminder)
-    embed.title = "✅ New Reminder Created"
-    embed.add_field(
-        name="🕒 Schedule",
-        value=f"At {target_time.strftime('%I:%M %p')} {timezone}\nRepeat: {repeat}",
-        inline=False
-    )
-    
-    await interaction.response.send_message(embed=embed)
+            if word.startswith('<@&'):  # Role mention
+                try:
+                    target_id = int(word[3:-1])
+                    is_role = True
+                except ValueError as e:
+                    logger.error(f"Failed to parse role ID from {word}: {str(e)}")
+                    continue
+            elif word.startswith('<@'):  # User mention
+                try:
+                    target_id = int(word[2:-1].replace('!', ''))
+                except ValueError as e:
+                    logger.error(f"Failed to parse user ID from {word}: {str(e)}")
+                    continue
+            else:  # Raw ID
+                try:
+                    target_id = int(word)
+                    # Check if it's a role ID
+                    role = interaction.guild.get_role(target_id)
+                    if role:
+                        is_role = True
+                    else:
+                        # Check if it's a valid user ID
+                        member = interaction.guild.get_member(target_id)
+                        if not member:
+                            logger.error(f"Could not find member or role with ID {target_id}")
+                            continue
+                except ValueError as e:
+                    logger.error(f"Failed to parse ID from {word}: {str(e)}")
+                    continue
+
+            if target_id:
+                if not target_type:
+                    target_type = 'role' if is_role else 'user'
+                elif (target_type == 'role') != is_role:
+                    await interaction.followup.send(
+                        "Cannot mix users and roles in the same reminder!",
+                        ephemeral=True
+                    )
+                    return
+                target_ids.append(target_id)
+
+        if not target_ids:
+            await interaction.followup.send(
+                "No valid targets found! Please mention users/roles or use their IDs.",
+                ephemeral=True
+            )
+            return
+
+        # Verify all targets exist
+        invalid_ids = []
+        for tid in target_ids:
+            if target_type == 'user':
+                if not interaction.guild.get_member(tid):
+                    invalid_ids.append(str(tid))
+            else:
+                if not interaction.guild.get_role(tid):
+                    invalid_ids.append(str(tid))
+        
+        if invalid_ids:
+            await interaction.followup.send(
+                f"Some {target_type}s were not found: {', '.join(invalid_ids)}",
+                ephemeral=True
+            )
+            return
+
+        if target_type == 'role' and dm:
+            await interaction.followup.send(
+                "Cannot send DMs to roles! Please use channel mentions for roles.",
+                ephemeral=True
+            )
+            return
+
+        # Get channel ID
+        if channel:
+            channel_id = channel.id
+        elif dm:
+            channel_id = None
+        else:
+            # First try to use the current channel
+            channel_id = interaction.channel_id
+            if not channel_id:
+                # If not in a channel, try to use the default channel
+                async with aiosqlite.connect(DB_PATH) as db:
+                    async with db.execute('SELECT default_channel_id FROM guild_settings WHERE guild_id = ?', 
+                                        (interaction.guild_id,)) as cursor:
+                        result = await cursor.fetchone()
+                        channel_id = result[0] if result else None
+
+                if not channel_id:
+                    await interaction.followup.send(
+                        "No channel specified and no default channel set! Please specify a channel or use /setchannel to set a default.",
+                        ephemeral=True
+                    )
+                    return
+
+        # Set interval based on repeat type
+        if repeat == 'never':
+            interval = int((target_time - now).total_seconds() / 60)
+            recurring = False
+        elif repeat == 'daily':
+            interval = 1440  # 24 hours in minutes
+            recurring = True
+        else:  # weekly
+            interval = 10080  # 7 days in minutes
+            recurring = True
+
+        # Insert the reminder
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute('''
+                INSERT INTO reminders (
+                    guild_id, channel_id, user_id, target_ids, target_type,
+                    message, interval, time_unit, last_ping, next_ping,
+                    dm, recurring, active
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                interaction.guild_id, 
+                channel_id,
+                interaction.user.id,
+                ','.join(map(str, target_ids)),
+                target_type,
+                message,
+                interval,
+                'minutes',
+                now.isoformat(),
+                target_time.isoformat(),
+                dm,
+                recurring,
+                True
+            ))
+            await db.commit()
+
+            # Get the ID of the inserted reminder
+            cursor = await db.execute('SELECT last_insert_rowid()')
+            row = await cursor.fetchone()
+            reminder_id = row[0]
+
+            # Fetch the newly created reminder
+            async with db.execute('SELECT * FROM reminders WHERE id = ?', (reminder_id,)) as cursor:
+                reminder = await cursor.fetchone()
+
+        embed = await create_reminder_embed(interaction, reminder)
+        embed.title = "✅ New Reminder Created"
+        embed.add_field(
+            name="🕒 Schedule",
+            value=f"At {target_time.strftime('%I:%M %p')} {timezone}\nRepeat: {repeat}",
+            inline=False
+        )
+        
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        logger.error(f"Error in add_reminder command: {str(e)}")
+        traceback.print_exc()
+        await interaction.followup.send(
+            "An error occurred while creating the reminder. Please try again later.",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="savetemplate", description="Save a reminder as a template")
 @app_commands.describe(
