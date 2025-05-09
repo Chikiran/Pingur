@@ -447,6 +447,11 @@ async def add_ping(
     # Calculate next ping time
     interval_minutes = interval * TIME_UNITS[time_unit]
     next_ping = now + timedelta(minutes=interval_minutes)
+    
+    # Ensure timezone-aware datetime storage
+    if next_ping.tzinfo is None:
+        next_ping = tz.localize(next_ping)
+    next_ping = next_ping.astimezone(pytz.utc)  # Store in UTC
 
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute('''
@@ -465,7 +470,7 @@ async def add_ping(
             message,
             interval,
             time_unit,
-            now.isoformat(),
+            now.astimezone(pytz.utc).isoformat(),  # Store in UTC
             next_ping.isoformat(),
             dm,
             True,  # Always recurring for interval-based pings
@@ -526,9 +531,15 @@ async def add_reminder(
         else:
             parsed_time = datetime.strptime(time, '%H:%M').time()
         
+        # Create timezone-aware target time
         target_time = now.replace(hour=parsed_time.hour, minute=parsed_time.minute)
         if target_time < now:
             target_time += timedelta(days=1)
+            
+        # Ensure timezone-aware datetime
+        if target_time.tzinfo is None:
+            target_time = tz.localize(target_time)
+        target_time = target_time.astimezone(pytz.utc)  # Store in UTC
     except ValueError:
         await interaction.response.send_message(
             "❌ Invalid time format! Examples:\n" +
@@ -796,6 +807,8 @@ async def list_templates(interaction: discord.Interaction):
 @tasks.loop(seconds=30)  # Check more frequently for accuracy
 async def check_reminders():
     """Check and send reminders"""
+    now = datetime.now(pytz.utc)  # Get current time in UTC
+    
     async with aiosqlite.connect(DB_PATH) as db:
         # Get all active reminders that need to be triggered
         async with db.execute('''
@@ -803,8 +816,8 @@ async def check_reminders():
             FROM reminders r
             LEFT JOIN guild_settings g ON r.guild_id = g.guild_id
             WHERE r.active = 1 
-            AND r.next_ping <= datetime('now')
-        ''') as cursor:
+            AND r.next_ping <= ?
+        ''', (now.isoformat(),)) as cursor:
             reminders = await cursor.fetchall()
             
         for reminder in reminders:
@@ -840,15 +853,18 @@ async def check_reminders():
                         await channel.send(f'{mentions} {message}')
 
                 # Update last ping and next ping times
-                now = datetime.now()
                 if is_recurring:
                     interval_minutes = interval * TIME_UNITS[time_unit]
-                    next_ping = now + timedelta(minutes=interval_minutes)
+                    # Calculate next ping time, ensuring it's in the future
+                    next_ping_time = now
+                    while next_ping_time <= now:
+                        next_ping_time += timedelta(minutes=interval_minutes)
+                    
                     await db.execute('''
                         UPDATE reminders 
                         SET last_ping = ?, next_ping = ?
                         WHERE id = ?
-                    ''', (now.isoformat(), next_ping.isoformat(), id))
+                    ''', (now.isoformat(), next_ping_time.isoformat(), id))
                 else:
                     # For one-time reminders, deactivate after sending
                     await db.execute('''
@@ -858,8 +874,12 @@ async def check_reminders():
                     ''', (now.isoformat(), id))
                 
                 await db.commit()
+                logger.info(f"Successfully processed reminder {id} for guild {guild.name}")
             except discord.Forbidden:
-                print(f'Failed to send message to targets in guild {guild.name}')
+                logger.error(f'Failed to send message to targets in guild {guild.name} - Missing permissions')
+            except Exception as e:
+                logger.error(f'Error processing reminder {id}: {str(e)}')
+                traceback.print_exc()
 
 @bot.tree.command(name="help", description="Show detailed help information")
 @app_commands.describe(
@@ -1349,11 +1369,21 @@ async def schedule(
                 # Get channel
                 channel = interaction.guild.get_channel(channel_id)
                 
-                # Format next ping time
-                next_time = datetime.fromisoformat(next_ping)
-                if isinstance(next_time, str):
-                    next_time = datetime.fromisoformat(next_time)
-                next_time = pytz.utc.localize(next_time).astimezone(tz)
+                # Format next ping time - Fixed timezone handling
+                try:
+                    # Parse the ISO format string
+                    next_time = datetime.fromisoformat(next_ping)
+                    
+                    # If the datetime is naive (no timezone), assume it's in UTC
+                    if next_time.tzinfo is None:
+                        next_time = pytz.utc.localize(next_time)
+                    # If it already has timezone info, just use it as is
+                    
+                    # Convert to server timezone
+                    next_time = next_time.astimezone(tz)
+                except ValueError as e:
+                    logger.error(f"Error parsing datetime: {e}")
+                    next_time = now  # Fallback to current time
                 
                 # Calculate time until next ping
                 time_until = next_time - now
