@@ -13,8 +13,9 @@ import sqlite3
 import traceback
 import logging
 import time
+import sys
 
-# Setup logging
+# Setup logging first
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -25,8 +26,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger('pingur')
 
-# Load environment variables
+# Load and verify environment variables
 load_dotenv()
+TOKEN = os.getenv('DISCORD_TOKEN')
+if not TOKEN:
+    logger.error("No Discord token found in environment variables!")
+    logger.error("Make sure you have a .env file with DISCORD_TOKEN=your_token")
+    sys.exit(1)
 
 # Constants
 ITEMS_PER_PAGE = 5
@@ -36,7 +42,9 @@ TIME_UNITS = {
     'days': 1440
 }
 
+# Ensure the database directory exists
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'reminders.db')
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 # Set up required bot intents
 intents = discord.Intents.default()
@@ -58,29 +66,32 @@ class PingurBot(commands.Bot):
 
     async def setup_hook(self):
         """Initial setup and command registration"""
-        logger.info("Starting command registration...")
+        logger.info("Starting setup...")
+        
+        # Initialize database first
         try:
-            # Clear any existing commands first
-            self.tree.clear_commands(guild=None)
-            await self.tree.sync()
-            logger.info("Cleared existing commands")
+            await setup_database()
+            logger.info("Database setup complete")
+        except Exception as e:
+            logger.error(f"Database setup failed: {e}")
+            raise
 
-            # Register commands globally
+        # Then register commands
+        try:
+            logger.info("Starting command registration...")
             commands = await self.tree.sync()
-            logger.info(f"Registered {len(commands)} global commands")
+            logger.info(f"Registered {len(commands)} commands")
             
             if not commands:
-                raise CommandRegistrationError("No commands were registered")
-            
-            # Log registered commands
-            for cmd in commands:
-                logger.info(f"Registered command: {cmd.name}")
+                logger.warning("No commands were registered!")
+            else:
+                for cmd in commands:
+                    logger.info(f"Registered command: {cmd.name}")
             
             return commands
         except Exception as e:
-            logger.error(f"Failed to register commands: {e}")
-            traceback.print_exc()
-            return []
+            logger.error(f"Command registration failed: {e}")
+            raise
 
     async def on_ready(self):
         """Called when bot is ready"""
@@ -88,23 +99,12 @@ class PingurBot(commands.Bot):
         logger.info(f"Connected to {len(self.guilds)} guilds")
         
         try:
-            # Sync commands to each guild
-            for guild in self.guilds:
-                try:
-                    commands = await self.tree.sync(guild=guild)
-                    logger.info(f"Synced {len(commands)} commands to {guild.name}")
-                    
-                    # Verify commands were registered
-                    fetched = await self.tree.fetch_commands(guild=guild)
-                    if not fetched:
-                        logger.warning(f"No commands found in {guild.name} after sync")
-                    else:
-                        logger.info(f"Verified {len(fetched)} commands in {guild.name}")
-                except Exception as e:
-                    logger.error(f"Failed to sync commands to {guild.name}: {e}")
+            # Start the reminder check loop
+            if not check_reminders.is_running():
+                check_reminders.start()
+                logger.info("Started reminder check loop")
             
-            check_reminders.start()
-            logger.info("Bot is ready!")
+            logger.info("Bot is fully ready!")
         except Exception as e:
             logger.error(f"Error during ready event: {e}")
             traceback.print_exc()
@@ -1207,286 +1207,18 @@ async def schedule(
     view = ScheduleView()
     await view.update_view(interaction)
 
-# Run the bot
-async def init_db():
-    print("Initializing database...")
+# Move the bot run to a main function with proper error handling
+def main():
     try:
-        await setup_database()
-        print("Database initialized successfully!")
+        logger.info("Starting Pingur bot...")
+        bot.run(TOKEN, log_handler=None)  # Disable default discord.py logging
+    except discord.LoginFailure:
+        logger.error("Failed to login! Check your Discord token.")
+        sys.exit(1)
     except Exception as e:
-        print(f"Failed to initialize database: {e}")
+        logger.error(f"Failed to start bot: {e}")
+        traceback.print_exc()
+        sys.exit(1)
 
-# Initialize the database and run the bot
-asyncio.run(init_db())
-
-# Make sure to delete the old database to force recreation with new schema
-try:
-    if os.path.exists(DB_PATH):
-        os.remove(DB_PATH)
-        print(f"Removed old database at {DB_PATH}")
-except Exception as e:
-    print(f"Failed to remove old database: {e}")
-
-# Register commands before running the bot
-@bot.event
-async def on_guild_join(guild):
-    """Handle new guild joins"""
-    print(f"Joined new guild: {guild.name} (ID: {guild.id})")
-    try:
-        # Clear existing commands for this guild
-        bot.tree.clear_commands(guild=guild)
-        # Sync commands to the new guild
-        await bot.tree.sync(guild=guild)
-        print(f"Successfully synced commands to new guild: {guild.name}")
-    except Exception as e:
-        print(f"Failed to sync commands for new guild {guild.name}: {str(e)}")
-        print(f"Error type: {type(e)}")
-
-# Error handling for command sync issues
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    """Enhanced error handling for application commands"""
-    logger.error(f"Command error in {interaction.command.name if interaction.command else 'Unknown command'}")
-    logger.error(f"Error type: {type(error).__name__}")
-    logger.error(f"Error message: {str(error)}")
-    
-    error_embed = discord.Embed(
-        title="❌ Command Error",
-        color=discord.Color.red()
-    )
-    
-    if isinstance(error, app_commands.CommandNotFound):
-        error_embed.description = (
-            "This command was not found. This might be because:\n"
-            "1. The command is still being registered\n"
-            "2. The bot lacks required permissions\n"
-            "3. Discord's API is having issues\n\n"
-            "Try using `/debugbot` to check the bot's status."
-        )
-    elif isinstance(error, app_commands.CommandOnCooldown):
-        error_embed.description = f"Command on cooldown. Try again in {error.retry_after:.1f}s"
-    elif isinstance(error, commands.MissingPermissions):
-        error_embed.description = f"Missing permissions: {', '.join(error.missing_permissions)}"
-    elif isinstance(error, CommandRegistrationError):
-        error_embed.description = "Failed to register commands. Please try again later."
-    else:
-        error_embed.description = (
-            f"An error occurred: {str(error)}\n"
-            f"Type: {type(error).__name__}\n\n"
-            "Please try `/debugbot` to check the bot's status."
-        )
-    
-    try:
-        if not interaction.response.is_done():
-            await interaction.response.send_message(embed=error_embed, ephemeral=True)
-        else:
-            await interaction.followup.send(embed=error_embed, ephemeral=True)
-    except Exception as e:
-        logger.error(f"Failed to send error message: {e}")
-
-# Add a diagnostic command
-@bot.tree.command(name="botdiag", description="Check bot's status and permissions")
-async def bot_diagnostics(interaction: discord.Interaction):
-    """Diagnostic command to check bot's status"""
-    try:
-        embed = discord.Embed(
-            title="🔍 Bot Diagnostics",
-            color=discord.Color.blue()
-        )
-        
-        # Bot information
-        embed.add_field(
-            name="Bot Info",
-            value=f"Name: {bot.user.name}\n"
-                  f"ID: {bot.user.id}\n"
-                  f"Latency: {round(bot.latency * 1000)}ms\n"
-                  f"Python Discord.py: {discord.__version__}",
-            inline=False
-        )
-        
-        # Command registration
-        global_commands = await bot.tree.fetch_commands()
-        guild_commands = await bot.tree.fetch_commands(guild=interaction.guild)
-        
-        embed.add_field(
-            name="Command Registration",
-            value=f"Global commands: {len(global_commands)}\n"
-                  f"Guild commands: {len(guild_commands)}\n"
-                  f"Sync flags: {bot.command_sync_flags.value}",
-            inline=False
-        )
-        
-        # List all commands
-        if global_commands:
-            embed.add_field(
-                name="Global Commands",
-                value="\n".join(f"• {cmd.name}" for cmd in global_commands),
-                inline=True
-            )
-        
-        if guild_commands:
-            embed.add_field(
-                name="Guild Commands",
-                value="\n".join(f"• {cmd.name}" for cmd in guild_commands),
-                inline=True
-            )
-        
-        # Permissions
-        perms = interaction.guild.me.guild_permissions
-        important_perms = [
-            "view_channel",
-            "send_messages",
-            "use_external_emojis",
-            "add_reactions",
-            "read_message_history",
-            "manage_messages",
-            "embed_links",
-            "attach_files",
-            "use_application_commands"
-        ]
-        
-        perm_status = []
-        for perm in important_perms:
-            status = "✅" if getattr(perms, perm) else "❌"
-            perm_status.append(f"{status} {perm}")
-        
-        embed.add_field(
-            name="Permissions",
-            value="\n".join(perm_status),
-            inline=False
-        )
-        
-        # Guild information
-        embed.add_field(
-            name="Guild Info",
-            value=f"Name: {interaction.guild.name}\n"
-                  f"ID: {interaction.guild.id}\n"
-                  f"Bot's top role: {interaction.guild.me.top_role}\n"
-                  f"Member count: {interaction.guild.member_count}",
-            inline=False
-        )
-        
-        # Application info
-        app_info = await bot.application_info()
-        embed.add_field(
-            name="Application Info",
-            value=f"Public bot: {app_info.bot_public}\n"
-                  f"Requires code grant: {app_info.bot_require_code_grant}\n"
-                  f"Scopes: applications.commands, bot",
-            inline=False
-        )
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        
-    except Exception as e:
-        logger.error(f"Error in debug command: {e}")
-        error_embed = discord.Embed(
-            title="❌ Diagnostic Error",
-            description=f"Error type: {type(e).__name__}\nError: {str(e)}",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=error_embed, ephemeral=True)
-
-@bot.tree.command(name="debugbot", description="Check bot permissions and command registration")
-async def debug_bot(interaction: discord.Interaction):
-    """Diagnostic command to check bot's status"""
-    try:
-        embed = discord.Embed(
-            title="🔍 Bot Diagnostics",
-            color=discord.Color.blue()
-        )
-        
-        # Bot information
-        embed.add_field(
-            name="Bot Info",
-            value=f"Name: {bot.user.name}\n"
-                  f"ID: {bot.user.id}\n"
-                  f"Latency: {round(bot.latency * 1000)}ms\n"
-                  f"Python Discord.py: {discord.__version__}",
-            inline=False
-        )
-        
-        # Command registration
-        global_commands = await bot.tree.fetch_commands()
-        guild_commands = await bot.tree.fetch_commands(guild=interaction.guild)
-        
-        embed.add_field(
-            name="Command Registration",
-            value=f"Global commands: {len(global_commands)}\n"
-                  f"Guild commands: {len(guild_commands)}\n"
-                  f"Sync flags: {bot.command_sync_flags.value}",
-            inline=False
-        )
-        
-        # List all commands
-        if global_commands:
-            embed.add_field(
-                name="Global Commands",
-                value="\n".join(f"• {cmd.name}" for cmd in global_commands),
-                inline=True
-            )
-        
-        if guild_commands:
-            embed.add_field(
-                name="Guild Commands",
-                value="\n".join(f"• {cmd.name}" for cmd in guild_commands),
-                inline=True
-            )
-        
-        # Permissions
-        perms = interaction.guild.me.guild_permissions
-        important_perms = [
-            "view_channel",
-            "send_messages",
-            "use_external_emojis",
-            "add_reactions",
-            "read_message_history",
-            "manage_messages",
-            "embed_links",
-            "attach_files",
-            "use_application_commands"
-        ]
-        
-        perm_status = []
-        for perm in important_perms:
-            status = "✅" if getattr(perms, perm) else "❌"
-            perm_status.append(f"{status} {perm}")
-        
-        embed.add_field(
-            name="Permissions",
-            value="\n".join(perm_status),
-            inline=False
-        )
-        
-        # Guild information
-        embed.add_field(
-            name="Guild Info",
-            value=f"Name: {interaction.guild.name}\n"
-                  f"ID: {interaction.guild.id}\n"
-                  f"Bot's top role: {interaction.guild.me.top_role}\n"
-                  f"Member count: {interaction.guild.member_count}",
-            inline=False
-        )
-        
-        # Application info
-        app_info = await bot.application_info()
-        embed.add_field(
-            name="Application Info",
-            value=f"Public bot: {app_info.bot_public}\n"
-                  f"Requires code grant: {app_info.bot_require_code_grant}\n"
-                  f"Scopes: applications.commands, bot",
-            inline=False
-        )
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        
-    except Exception as e:
-        logger.error(f"Error in debug command: {e}")
-        error_embed = discord.Embed(
-            title="❌ Diagnostic Error",
-            description=f"Error type: {type(e).__name__}\nError: {str(e)}",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=error_embed, ephemeral=True)
-
-bot.run(os.getenv('DISCORD_TOKEN')) 
+if __name__ == "__main__":
+    main() 
