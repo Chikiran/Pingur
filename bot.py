@@ -39,9 +39,26 @@ class PingurBot(commands.Bot):
         self.reminder_pages = {}  # Store pagination info
 
     async def setup_hook(self):
-        if not self.tree_sync_flag:
+        print("Setting up the bot...")
+        try:
+            print("Syncing command tree...")
+            # Clear the command tree first
+            self._application_commands = []
+            # Force sync all commands
             await self.tree.sync()
-            self.tree_sync_flag = True
+            print("Command tree synced successfully!")
+        except Exception as e:
+            print(f"Failed to sync command tree: {e}")
+
+    async def on_ready(self):
+        print(f'Logged in as {self.user} (ID: {self.user.id})')
+        print('------')
+        try:
+            print("Performing additional command sync...")
+            await self.tree.sync()
+            print("Additional command sync completed!")
+        except Exception as e:
+            print(f"Failed additional command sync: {e}")
 
 bot = PingurBot()
 
@@ -296,19 +313,25 @@ async def add_reminder(
     # Get channel ID
     if channel:
         channel_id = channel.id
+    elif dm:
+        channel_id = None
     else:
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute('SELECT default_channel_id FROM guild_settings WHERE guild_id = ?', 
-                                (interaction.guild_id,)) as cursor:
-                result = await cursor.fetchone()
-                channel_id = result[0] if result else None
+        # First try to use the current channel
+        channel_id = interaction.channel_id
+        if not channel_id:
+            # If not in a channel, try to use the default channel
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute('SELECT default_channel_id FROM guild_settings WHERE guild_id = ?', 
+                                    (interaction.guild_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    channel_id = result[0] if result else None
 
-        if not channel_id and not dm:
-            await interaction.response.send_message(
-                "No default channel set! Use /setchannel first or specify a channel.",
-                ephemeral=True
-            )
-            return
+            if not channel_id:
+                await interaction.response.send_message(
+                    "No channel specified and no default channel set! Please specify a channel or use /setchannel to set a default.",
+                    ephemeral=True
+                )
+                return
 
     # Calculate interval if recurring
     if recurring:
@@ -1056,9 +1079,51 @@ async def schedule(
 # Run the bot
 async def init_db():
     print("Initializing database...")
-    await setup_database()
-    print("Database initialized successfully!")
+    try:
+        await setup_database()
+        print("Database initialized successfully!")
+    except Exception as e:
+        print(f"Failed to initialize database: {e}")
 
 # Initialize the database and run the bot
 asyncio.run(init_db())
+
+# Make sure to delete the old database to force recreation with new schema
+try:
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
+        print(f"Removed old database at {DB_PATH}")
+except Exception as e:
+    print(f"Failed to remove old database: {e}")
+
+# Register commands before running the bot
+@bot.event
+async def on_guild_join(guild):
+    print(f"Joined new guild: {guild.name} (ID: {guild.id})")
+    try:
+        await bot.tree.sync(guild=guild)
+        print(f"Synced commands for guild: {guild.name}")
+    except Exception as e:
+        print(f"Failed to sync commands for guild {guild.name}: {e}")
+
+# Error handling for command sync issues
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CommandNotFound):
+        await interaction.response.send_message(
+            "❌ This command is not properly registered. Please wait a moment and try again.",
+            ephemeral=True
+        )
+    elif isinstance(error, app_commands.CommandOnCooldown):
+        await interaction.response.send_message(
+            f"❌ This command is on cooldown. Try again in {error.retry_after:.2f} seconds.",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"❌ An error occurred: {str(error)}",
+            ephemeral=True
+        )
+        print(f"Command error in {interaction.guild.name}: {str(error)}")
+
 bot.run(os.getenv('DISCORD_TOKEN')) 
