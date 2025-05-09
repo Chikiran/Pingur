@@ -349,8 +349,8 @@ async def set_channel(
 @app_commands.describe(
     targets="Users/Roles to remind (mention them or use IDs)",
     interval="Number of time units between pings",
-    time_unit="Time unit (minutes/hours/days)",
     message="Message to send with the ping",
+    time_unit="Time unit (minutes/hours/days)",
     dm="Send as DM instead of channel message (only for users)",
     channel="Channel to send ping (optional, uses current channel if not specified)"
 )
@@ -358,8 +358,8 @@ async def add_ping(
     interaction: discord.Interaction,
     targets: str,
     interval: int,
-    time_unit: Literal['minutes', 'hours', 'days'] = 'minutes',  # Default to minutes
     message: str,
+    time_unit: Literal['minutes', 'hours', 'days'] = 'minutes',  # Default to minutes
     dm: bool = False,
     channel: Optional[discord.TextChannel] = None
 ):
