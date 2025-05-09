@@ -348,7 +348,7 @@ async def set_channel(
 
 @bot.tree.command(name="addping", description="Add an interval-based ping (e.g., every X minutes/hours/days)")
 @app_commands.describe(
-    targets="Users/Roles to remind (mention them or use IDs)",
+    targets="Users/Roles to remind (mention them, use IDs, or separate multiple with spaces)",
     time_unit="Time unit (minutes/hours/days)",
     interval="Number of time units between pings",
     message="Message to send with the ping",
@@ -379,38 +379,66 @@ async def add_ping(
     target_type = None
     
     for word in targets.split():
+        target_id = None
+        is_role = False
+
         if word.startswith('<@&'):  # Role mention
             try:
-                role_id = int(word[3:-1])
-                if not target_type:
-                    target_type = 'role'
-                elif target_type != 'role':
-                    await interaction.response.send_message(
-                        "Cannot mix users and roles in the same ping!",
-                        ephemeral=True
-                    )
-                    return
-                target_ids.append(role_id)
+                target_id = int(word[3:-1])
+                is_role = True
             except ValueError:
                 continue
         elif word.startswith('<@'):  # User mention
             try:
-                user_id = int(word[2:-1].replace('!', ''))
-                if not target_type:
-                    target_type = 'user'
-                elif target_type != 'user':
-                    await interaction.response.send_message(
-                        "Cannot mix users and roles in the same ping!",
-                        ephemeral=True
-                    )
-                    return
-                target_ids.append(user_id)
+                target_id = int(word[2:-1].replace('!', ''))
+            except ValueError:
+                continue
+        else:  # Raw ID
+            try:
+                target_id = int(word)
+                # Check if it's a role ID
+                role = interaction.guild.get_role(target_id)
+                if role:
+                    is_role = True
+                else:
+                    # Check if it's a valid user ID
+                    member = interaction.guild.get_member(target_id)
+                    if not member:
+                        continue
             except ValueError:
                 continue
 
+        if target_id:
+            if not target_type:
+                target_type = 'role' if is_role else 'user'
+            elif (target_type == 'role') != is_role:
+                await interaction.response.send_message(
+                    "Cannot mix users and roles in the same ping!",
+                    ephemeral=True
+                )
+                return
+            target_ids.append(target_id)
+
     if not target_ids:
         await interaction.response.send_message(
-            "No valid targets found! Please mention users or roles.",
+            "No valid targets found! Please mention users/roles or use their IDs.",
+            ephemeral=True
+        )
+        return
+
+    # Verify all targets exist
+    invalid_ids = []
+    for tid in target_ids:
+        if target_type == 'user':
+            if not interaction.guild.get_member(tid):
+                invalid_ids.append(str(tid))
+        else:
+            if not interaction.guild.get_role(tid):
+                invalid_ids.append(str(tid))
+    
+    if invalid_ids:
+        await interaction.response.send_message(
+            f"Some {target_type}s were not found: {', '.join(invalid_ids)}",
             ephemeral=True
         )
         return
@@ -498,7 +526,6 @@ async def add_ping(
     # Get channel for display
     channel_display = interaction.guild.get_channel(channel_id) if channel_id else None
 
-    # Create simple embed
     # Get location string
     if dm:
         location = "📱 DM"
