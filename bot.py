@@ -454,37 +454,39 @@ async def add_ping(
     next_ping = next_ping.astimezone(pytz.utc)  # Store in UTC
 
     # Insert the reminder
-    cursor = await db.execute('''
-        INSERT INTO reminders (
-            guild_id, channel_id, user_id, target_ids, target_type,
-            message, interval, time_unit, last_ping, next_ping,
-            dm, recurring, active
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        interaction.guild_id, 
-        channel_id,
-        interaction.user.id,
-        ','.join(map(str, target_ids)),
-        target_type,
-        message,
-        interval,
-        time_unit,
-        now.isoformat(),
-        next_ping.isoformat(),
-        dm,
-        True,  # Always recurring for interval-based pings
-        True
-    ))
-    await db.commit()
-    
-    # Get the ID of the inserted reminder
-    cursor = await db.execute('SELECT last_insert_rowid()')
-    reminder_id = (await cursor.fetchone())[0]
-    
-    # Get the full reminder data for the response
-    cursor = await db.execute('SELECT * FROM reminders WHERE id = ?', (reminder_id,))
-    reminder = await cursor.fetchone()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute('''
+            INSERT INTO reminders (
+                guild_id, channel_id, user_id, target_ids, target_type,
+                message, interval, time_unit, last_ping, next_ping,
+                dm, recurring, active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            interaction.guild_id, 
+            channel_id,
+            interaction.user.id,
+            ','.join(map(str, target_ids)),
+            target_type,
+            message,
+            interval,
+            time_unit,
+            now.astimezone(pytz.utc).isoformat(),  # Store in UTC
+            next_ping.isoformat(),
+            dm,
+            True,  # Always recurring for interval-based pings
+            True
+        ))
+        await db.commit()
+        
+        # Get the ID of the inserted reminder
+        cursor = await db.execute('SELECT last_insert_rowid()')
+        row = await cursor.fetchone()
+        reminder_id = row[0]
+
+        # Fetch the newly created reminder
+        cursor = await db.execute('SELECT * FROM reminders WHERE id = ?', (reminder_id,))
+        reminder = await cursor.fetchone()
 
     embed = await create_reminder_embed(interaction, reminder)
     embed.title = "✅ New Ping Created"
