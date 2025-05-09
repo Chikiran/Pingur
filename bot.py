@@ -216,6 +216,7 @@ async def setup_database(db):
             dm BOOLEAN DEFAULT false,
             active BOOLEAN DEFAULT true,
             recurring BOOLEAN DEFAULT true,
+            ghost_ping BOOLEAN DEFAULT false,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(guild_id) REFERENCES guild_settings(guild_id) ON DELETE CASCADE
         )
@@ -364,187 +365,201 @@ async def add_ping(
     dm: bool = False,
     channel: Optional[discord.TextChannel] = None
 ):
-    # Get server timezone
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute('SELECT timezone FROM guild_settings WHERE guild_id = ?', 
-                            (interaction.guild_id,)) as cursor:
-            result = await cursor.fetchone()
-            timezone = result[0] if result else 'UTC'
-
-    tz = pytz.timezone(timezone)
-    now = datetime.now(tz)
-
-    # Parse targets (users and roles)
-    target_ids = []
-    target_type = None
-    
-    for word in targets.split():
-        target_id = None
-        is_role = False
-
-        if word.startswith('<@&'):  # Role mention
-            try:
-                target_id = int(word[3:-1])
-                is_role = True
-            except ValueError:
-                continue
-        elif word.startswith('<@'):  # User mention
-            try:
-                target_id = int(word[2:-1].replace('!', ''))
-            except ValueError:
-                continue
-        else:  # Raw ID
-            try:
-                target_id = int(word)
-                # Check if it's a role ID
-                role = interaction.guild.get_role(target_id)
-                if role:
-                    is_role = True
-                else:
-                    # Check if it's a valid user ID
-                    member = interaction.guild.get_member(target_id)
-                    if not member:
-                        continue
-            except ValueError:
-                continue
-
-        if target_id:
-            if not target_type:
-                target_type = 'role' if is_role else 'user'
-            elif (target_type == 'role') != is_role:
-                await interaction.response.send_message(
-                    "Cannot mix users and roles in the same ping!",
-                    ephemeral=True
-                )
-                return
-            target_ids.append(target_id)
-
-    if not target_ids:
-        await interaction.response.send_message(
-            "No valid targets found! Please mention users/roles or use their IDs.",
-            ephemeral=True
-        )
-        return
-
-    # Verify all targets exist
-    invalid_ids = []
-    for tid in target_ids:
-        if target_type == 'user':
-            if not interaction.guild.get_member(tid):
-                invalid_ids.append(str(tid))
-        else:
-            if not interaction.guild.get_role(tid):
-                invalid_ids.append(str(tid))
-    
-    if invalid_ids:
-        await interaction.response.send_message(
-            f"Some {target_type}s were not found: {', '.join(invalid_ids)}",
-            ephemeral=True
-        )
-        return
-
-    if target_type == 'role' and dm:
-        await interaction.response.send_message(
-            "Cannot send DMs to roles! Please use channel mentions for roles.",
-            ephemeral=True
-        )
-        return
-
-    # Get channel ID
-    if channel:
-        channel_id = channel.id
-    elif dm:
-        channel_id = None
-    else:
-        # First try to use the current channel
-        channel_id = interaction.channel_id
-        if not channel_id:
-            # If not in a channel, try to use the default channel
-            async with aiosqlite.connect(DB_PATH) as db:
-                async with db.execute('SELECT default_channel_id FROM guild_settings WHERE guild_id = ?', 
-                                    (interaction.guild_id,)) as cursor:
-                    result = await cursor.fetchone()
-                    channel_id = result[0] if result else None
-
-            if not channel_id:
-                await interaction.response.send_message(
-                    "No channel specified and no default channel set! Please specify a channel or use /setchannel to set a default.",
-                    ephemeral=True
-                )
-                return
-
-    # Calculate next ping time
-    interval_minutes = interval * TIME_UNITS[time_unit]
-    next_ping = now + timedelta(minutes=interval_minutes)
-    
-    # Ensure timezone-aware datetime storage
-    if next_ping.tzinfo is None:
-        next_ping = tz.localize(next_ping)
-    next_ping = next_ping.astimezone(pytz.utc)  # Store in UTC
-
-    # Insert the reminder
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute('''
-            INSERT INTO reminders (
-                guild_id, channel_id, user_id, target_ids, target_type,
-                message, interval, time_unit, last_ping, next_ping,
-                dm, recurring, active
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            interaction.guild_id, 
-            channel_id,
-            interaction.user.id,
-            ','.join(map(str, target_ids)),
-            target_type,
-            message,
-            interval,
-            time_unit,
-            now.astimezone(pytz.utc).isoformat(),  # Store in UTC
-            next_ping.isoformat(),
-            dm,
-            True,  # Always recurring for interval-based pings
-            True
-        ))
-        await db.commit()
+    try:
+        await interaction.response.defer()
         
-        # Get the ID of the inserted reminder
-        cursor = await db.execute('SELECT last_insert_rowid()')
-        row = await cursor.fetchone()
-        reminder_id = row[0]
+        # Get server timezone
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('SELECT timezone FROM guild_settings WHERE guild_id = ?', 
+                                (interaction.guild_id,)) as cursor:
+                result = await cursor.fetchone()
+                timezone = result[0] if result else 'UTC'
 
-    # Get targets for display
-    targets_display = []
-    for tid in target_ids:
-        if target_type == 'user':
-            target = interaction.guild.get_member(int(tid))
+        tz = pytz.timezone(timezone)
+        now = datetime.now(tz)
+
+        # Parse targets (users and roles)
+        target_ids = []
+        target_type = None
+        
+        for word in targets.split():
+            target_id = None
+            is_role = False
+
+            if word.startswith('<@&'):  # Role mention
+                try:
+                    target_id = int(word[3:-1])
+                    is_role = True
+                except ValueError as e:
+                    logger.error(f"Failed to parse role ID from {word}: {str(e)}")
+                    continue
+            elif word.startswith('<@'):  # User mention
+                try:
+                    target_id = int(word[2:-1].replace('!', ''))
+                except ValueError as e:
+                    logger.error(f"Failed to parse user ID from {word}: {str(e)}")
+                    continue
+            else:  # Raw ID
+                try:
+                    target_id = int(word)
+                    # Check if it's a role ID
+                    role = interaction.guild.get_role(target_id)
+                    if role:
+                        is_role = True
+                    else:
+                        # Check if it's a valid user ID
+                        member = interaction.guild.get_member(target_id)
+                        if not member:
+                            logger.error(f"Could not find member or role with ID {target_id}")
+                            continue
+                except ValueError as e:
+                    logger.error(f"Failed to parse ID from {word}: {str(e)}")
+                    continue
+
+            if target_id:
+                if not target_type:
+                    target_type = 'role' if is_role else 'user'
+                elif (target_type == 'role') != is_role:
+                    await interaction.followup.send(
+                        "Cannot mix users and roles in the same ping!",
+                        ephemeral=True
+                    )
+                    return
+                target_ids.append(target_id)
+
+        if not target_ids:
+            await interaction.followup.send(
+                "No valid targets found! Please mention users/roles or use their IDs.",
+                ephemeral=True
+            )
+            return
+
+        # Verify all targets exist
+        invalid_ids = []
+        for tid in target_ids:
+            if target_type == 'user':
+                if not interaction.guild.get_member(tid):
+                    invalid_ids.append(str(tid))
+            else:
+                if not interaction.guild.get_role(tid):
+                    invalid_ids.append(str(tid))
+        
+        if invalid_ids:
+            await interaction.followup.send(
+                f"Some {target_type}s were not found: {', '.join(invalid_ids)}",
+                ephemeral=True
+            )
+            return
+
+        if target_type == 'role' and dm:
+            await interaction.followup.send(
+                "Cannot send DMs to roles! Please use channel mentions for roles.",
+                ephemeral=True
+            )
+            return
+
+        # Get channel ID
+        if channel:
+            channel_id = channel.id
+        elif dm:
+            channel_id = None
         else:
-            target = interaction.guild.get_role(int(tid))
-        if target:
-            targets_display.append(target.mention)
+            # First try to use the current channel
+            channel_id = interaction.channel_id
+            if not channel_id:
+                # If not in a channel, try to use the default channel
+                async with aiosqlite.connect(DB_PATH) as db:
+                    async with db.execute('SELECT default_channel_id FROM guild_settings WHERE guild_id = ?', 
+                                        (interaction.guild_id,)) as cursor:
+                        result = await cursor.fetchone()
+                        channel_id = result[0] if result else None
 
-    # Get channel for display
-    channel_display = interaction.guild.get_channel(channel_id) if channel_id else None
+                if not channel_id:
+                    await interaction.followup.send(
+                        "No channel specified and no default channel set! Please specify a channel or use /setchannel to set a default.",
+                        ephemeral=True
+                    )
+                    return
 
-    # Get location string
-    if dm:
-        location = "📱 DM"
-    else:
-        location = "📢 Unknown"
-        if channel_display:
-            location = f"📢 {channel_display.mention}"
+        # Calculate next ping time
+        interval_minutes = interval * TIME_UNITS[time_unit]
+        next_ping = now + timedelta(minutes=interval_minutes)
+        
+        # Ensure timezone-aware datetime storage
+        if next_ping.tzinfo is None:
+            next_ping = tz.localize(next_ping)
+        next_ping = next_ping.astimezone(pytz.utc)
 
-    embed = discord.Embed(
-        title="✅ New Ping Created",
-        description=f"**ID:** #{reminder_id}\n" +
-                   f"**Interval:** Every {interval} {time_unit}\n" +
-                   f"**To:** {', '.join(targets_display) or 'No targets'}\n" +
-                   f"**Where:** {location}\n" +
-                   f"**Message:** {message}",
-        color=discord.Color.green()
-    )
-    
-    await interaction.response.send_message(embed=embed)
+        # Insert the reminder
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute('''
+                INSERT INTO reminders (
+                    guild_id, channel_id, user_id, target_ids, target_type,
+                    message, interval, time_unit, last_ping, next_ping,
+                    dm, recurring, active
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                interaction.guild_id, 
+                channel_id,
+                interaction.user.id,
+                ','.join(map(str, target_ids)),
+                target_type,
+                message,
+                interval,
+                time_unit,
+                now.astimezone(pytz.utc).isoformat(),  # Store in UTC
+                next_ping.isoformat(),
+                dm,
+                True,  # Always recurring for interval-based pings
+                True
+            ))
+            await db.commit()
+            
+            # Get the ID of the inserted reminder
+            cursor = await db.execute('SELECT last_insert_rowid()')
+            row = await cursor.fetchone()
+            reminder_id = row[0]
+
+        # Get targets for display
+        targets_display = []
+        for tid in target_ids:
+            if target_type == 'user':
+                target = interaction.guild.get_member(int(tid))
+            else:
+                target = interaction.guild.get_role(int(tid))
+            if target:
+                targets_display.append(target.mention)
+
+        # Get channel for display
+        channel_display = interaction.guild.get_channel(channel_id) if channel_id else None
+
+        # Get location string
+        if dm:
+            location = "📱 DM"
+        else:
+            location = "📢 Unknown"
+            if channel_display:
+                location = f"📢 {channel_display.mention}"
+
+        embed = discord.Embed(
+            title="✅ New Ping Created",
+            description=f"**ID:** #{reminder_id}\n" +
+                       f"**Interval:** Every {interval} {time_unit}\n" +
+                       f"**To:** {', '.join(targets_display) or 'No targets'}\n" +
+                       f"**Where:** {location}\n" +
+                       f"**Message:** {message}",
+            color=discord.Color.green()
+        )
+        
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        logger.error(f"Error in add_ping command: {str(e)}")
+        traceback.print_exc()
+        await interaction.followup.send(
+            "An error occurred while creating the ping. Please try again later.",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="addreminder", description="Add a time-based reminder (e.g., daily at 3pm)")
 @app_commands.describe(
@@ -969,79 +984,88 @@ async def list_reminders(
 @tasks.loop(seconds=30)  # Check more frequently for accuracy
 async def check_reminders():
     """Check and send reminders"""
-    now = datetime.now(pytz.utc)  # Get current time in UTC
-    
-    async with aiosqlite.connect(DB_PATH) as db:
-        # Get all active reminders that need to be triggered
-        async with db.execute('''
-            SELECT r.*, g.timezone 
-            FROM reminders r
-            LEFT JOIN guild_settings g ON r.guild_id = g.guild_id
-            WHERE r.active = 1 
-            AND r.next_ping <= ?
-        ''', (now.isoformat(),)) as cursor:
-            reminders = await cursor.fetchall()
-            
-        for reminder in reminders:
-            id, guild_id, channel_id, user_id, target_ids, target_type, message, interval, time_unit, last_ping, next_ping, is_dm, active, is_recurring, created_at, timezone = reminder
-            
-            guild = bot.get_guild(guild_id)
-            if not guild:
-                continue
+    try:
+        now = datetime.now(pytz.utc)
+        
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('''
+                SELECT * FROM reminders 
+                WHERE active = 1 AND next_ping <= ?
+            ''', (now.isoformat(),)) as cursor:
+                reminders = await cursor.fetchall()
 
-            # Get targets (users or roles)
-            targets = []
-            for target_id in target_ids.split(','):
-                if target_type == 'user':
-                    target = guild.get_member(int(target_id))
+            for reminder in reminders:
+                id, guild_id, channel_id, user_id, target_ids_str, target_type, message, interval, time_unit, last_ping, next_ping, is_dm, recurring, active, ghost_ping = reminder
+                
+                guild = bot.get_guild(guild_id)
+                if not guild:
+                    logger.error(f'Could not find guild {guild_id} for reminder {id}')
+                    continue
+
+                # Get targets
+                target_ids = [int(tid) for tid in target_ids_str.split(',')]
+                targets = []
+                for tid in target_ids:
+                    if target_type == 'user':
+                        target = guild.get_member(tid)
+                    else:
+                        target = guild.get_role(tid)
                     if target:
                         targets.append(target)
-                else:
-                    role = guild.get_role(int(target_id))
-                    if role:
-                        targets.append(role)
 
-            if not targets:
-                continue
+                if not targets:
+                    logger.error(f'No valid targets found for reminder {id} in guild {guild.name}')
+                    continue
 
-            try:
-                if is_dm and target_type == 'user':
-                    for target in targets:
-                        await target.send(f'{message}')
-                else:
-                    channel = guild.get_channel(channel_id)
-                    if channel:
-                        mentions = ' '.join(target.mention for target in targets)
-                        await channel.send(f'{mentions} {message}')
+                try:
+                    if is_dm and target_type == 'user':
+                        for target in targets:
+                            await target.send(f'{message}')
+                    else:
+                        channel = guild.get_channel(channel_id)
+                        if channel:
+                            mentions = ' '.join(target.mention for target in targets)
+                            sent_message = await channel.send(f'{mentions} {message}')
+                            
+                            # If this is a ghost ping, delete it immediately
+                            if ghost_ping:
+                                try:
+                                    await sent_message.delete()
+                                except Exception as e:
+                                    logger.error(f'Failed to delete ghost ping message: {str(e)}')
 
-                # Update last ping and next ping times
-                if is_recurring:
-                    interval_minutes = interval * TIME_UNITS[time_unit]
-                    # Calculate next ping time, ensuring it's in the future
-                    next_ping_time = now
-                    while next_ping_time <= now:
-                        next_ping_time += timedelta(minutes=interval_minutes)
+                    # Update last ping and next ping times
+                    if recurring:
+                        interval_minutes = interval * TIME_UNITS[time_unit]
+                        # Calculate next ping time, ensuring it's in the future
+                        next_ping_time = now
+                        while next_ping_time <= now:
+                            next_ping_time += timedelta(minutes=interval_minutes)
+                        
+                        await db.execute('''
+                            UPDATE reminders 
+                            SET last_ping = ?, next_ping = ?
+                            WHERE id = ?
+                        ''', (now.isoformat(), next_ping_time.isoformat(), id))
+                    else:
+                        # For one-time reminders, deactivate after sending
+                        await db.execute('''
+                            UPDATE reminders 
+                            SET active = 0, last_ping = ?
+                            WHERE id = ?
+                        ''', (now.isoformat(), id))
                     
-                    await db.execute('''
-                        UPDATE reminders 
-                        SET last_ping = ?, next_ping = ?
-                        WHERE id = ?
-                    ''', (now.isoformat(), next_ping_time.isoformat(), id))
-                else:
-                    # For one-time reminders, deactivate after sending
-                    await db.execute('''
-                        UPDATE reminders 
-                        SET active = 0, last_ping = ?
-                        WHERE id = ?
-                    ''', (now.isoformat(), id))
-                
-                await db.commit()
-                logger.info(f"Successfully processed reminder {id} for guild {guild.name}")
-            except discord.Forbidden:
-                logger.error(f'Failed to send message to targets in guild {guild.name} - Missing permissions')
-            except Exception as e:
-                logger.error(f'Error processing reminder {id}: {str(e)}')
-                traceback.print_exc()
+                    await db.commit()
+                    logger.info(f"Successfully processed reminder {id} for guild {guild.name}")
+                except discord.Forbidden:
+                    logger.error(f'Failed to send message to targets in guild {guild.name} - Missing permissions')
+                except Exception as e:
+                    logger.error(f'Error processing reminder {id}: {str(e)}')
+                    traceback.print_exc()
+
+    except Exception as e:
+        logger.error(f"Error in check_reminders: {str(e)}")
+        traceback.print_exc()
 
 @check_reminders.before_loop
 async def before_check_reminders():
@@ -1093,7 +1117,7 @@ async def help_command(
     command: Optional[Literal[
         'addping', 'editping', 'removeping', 'list',
         'setchannel', 'settimezone', 'savetemplate', 'usetemplate',
-        'pauseping', 'pauseall', 'resumeping',
+        'pauseping', 'pauseall', 'resumeping', 'ghostping',
         'setstatus', 'setnick', 'setavatar', 'setbio'
     ]] = None
 ):
@@ -1121,6 +1145,29 @@ async def help_command(
                     "message:Status update? channel:#team-chat`\n"
                     "3. `/addping targets:@user interval:1 time_unit:days "
                     "dm:true message:Daily medication reminder`"
+                ),
+                inline=False
+            ),
+            
+            'ghostping': discord.Embed(
+                title="👻 Ghost Ping Command",
+                description="Create a ping that deletes itself immediately after sending (Owner only)",
+                color=discord.Color.purple()
+            ).add_field(
+                name="Usage",
+                value=(
+                    "`/ghostping targets:@users/roles interval:number time_unit:[minutes/hours/days] "
+                    "message:your message`\n"
+                    "Optional: `channel:#channel`"
+                ),
+                inline=False
+            ).add_field(
+                name="Notes",
+                value=(
+                    "- Only available to the bot owner\n"
+                    "- Message is deleted immediately after sending\n"
+                    "- DMs are not supported for ghost pings\n"
+                    "- Can target both users and roles"
                 ),
                 inline=False
             ),
@@ -1185,6 +1232,7 @@ async def help_command(
         embed.add_field(
             name="🔧 Owner Commands",
             value=(
+                "`/ghostping` - Create self-deleting pings\n"
                 "`/setstatus` - Set bot's activity status\n"
                 "`/setnick` - Change bot's nickname\n"
                 "`/setavatar` - Update bot's profile picture\n"
@@ -1547,7 +1595,7 @@ async def remove_ping(interaction: discord.Interaction):
                         reminder = await cursor.fetchone()
                         
                     if not reminder:
-                        await interaction.response.send_message('❌ Ping not found!', ephemeral=True)
+                        await interaction.followup.send('❌ Ping not found!', ephemeral=True)
                         return
                     
                     # Delete the ping
@@ -1749,6 +1797,208 @@ async def set_bio(
         logger.error(f"Error in set_bio: {str(e)}")
         await interaction.response.send_message(
             "❌ Failed to update bio!",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="ghostping", description="Create a ghost ping that deletes itself right after pinging (Owner only)")
+@app_commands.describe(
+    targets="Users/Roles to remind (mention them, use IDs, or separate multiple with spaces)",
+    time_unit="Time unit (minutes/hours/days)",
+    interval="Number of time units between pings",
+    message="Message to send with the ping",
+    channel="Channel to send ping (optional, uses current channel if not specified)"
+)
+async def ghost_ping(
+    interaction: discord.Interaction,
+    targets: str,
+    time_unit: Literal['minutes', 'hours', 'days'],
+    interval: int,
+    message: str,
+    channel: Optional[discord.TextChannel] = None
+):
+    try:
+        # Check if user is the bot owner
+        app_info = await bot.application_info()
+        if interaction.user.id != app_info.owner.id:
+            await interaction.response.send_message("❌ This command is only available to the bot owner!", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        
+        # Get server timezone
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('SELECT timezone FROM guild_settings WHERE guild_id = ?', 
+                                (interaction.guild_id,)) as cursor:
+                result = await cursor.fetchone()
+                timezone = result[0] if result else 'UTC'
+
+        tz = pytz.timezone(timezone)
+        now = datetime.now(tz)
+
+        # Parse targets (users and roles)
+        target_ids = []
+        target_type = None
+        
+        for word in targets.split():
+            target_id = None
+            is_role = False
+
+            if word.startswith('<@&'):  # Role mention
+                try:
+                    target_id = int(word[3:-1])
+                    is_role = True
+                except ValueError as e:
+                    logger.error(f"Failed to parse role ID from {word}: {str(e)}")
+                    continue
+            elif word.startswith('<@'):  # User mention
+                try:
+                    target_id = int(word[2:-1].replace('!', ''))
+                except ValueError as e:
+                    logger.error(f"Failed to parse user ID from {word}: {str(e)}")
+                    continue
+            else:  # Raw ID
+                try:
+                    target_id = int(word)
+                    # Check if it's a role ID
+                    role = interaction.guild.get_role(target_id)
+                    if role:
+                        is_role = True
+                    else:
+                        # Check if it's a valid user ID
+                        member = interaction.guild.get_member(target_id)
+                        if not member:
+                            logger.error(f"Could not find member or role with ID {target_id}")
+                            continue
+                except ValueError as e:
+                    logger.error(f"Failed to parse ID from {word}: {str(e)}")
+                    continue
+
+            if target_id:
+                if not target_type:
+                    target_type = 'role' if is_role else 'user'
+                elif (target_type == 'role') != is_role:
+                    await interaction.followup.send(
+                        "Cannot mix users and roles in the same ping!",
+                        ephemeral=True
+                    )
+                    return
+                target_ids.append(target_id)
+
+        if not target_ids:
+            await interaction.followup.send(
+                "No valid targets found! Please mention users/roles or use their IDs.",
+                ephemeral=True
+            )
+            return
+
+        # Verify all targets exist
+        invalid_ids = []
+        for tid in target_ids:
+            if target_type == 'user':
+                if not interaction.guild.get_member(tid):
+                    invalid_ids.append(str(tid))
+            else:
+                if not interaction.guild.get_role(tid):
+                    invalid_ids.append(str(tid))
+        
+        if invalid_ids:
+            await interaction.followup.send(
+                f"Some {target_type}s were not found: {', '.join(invalid_ids)}",
+                ephemeral=True
+            )
+            return
+
+        # Get channel ID
+        if channel:
+            channel_id = channel.id
+        else:
+            # First try to use the current channel
+            channel_id = interaction.channel_id
+            if not channel_id:
+                # If not in a channel, try to use the default channel
+                async with aiosqlite.connect(DB_PATH) as db:
+                    async with db.execute('SELECT default_channel_id FROM guild_settings WHERE guild_id = ?', 
+                                        (interaction.guild_id,)) as cursor:
+                        result = await cursor.fetchone()
+                        channel_id = result[0] if result else None
+
+                if not channel_id:
+                    await interaction.followup.send(
+                        "No channel specified and no default channel set! Please specify a channel or use /setchannel to set a default.",
+                        ephemeral=True
+                    )
+                    return
+
+        # Calculate next ping time
+        interval_minutes = interval * TIME_UNITS[time_unit]
+        next_ping = now + timedelta(minutes=interval_minutes)
+        
+        # Ensure timezone-aware datetime storage
+        if next_ping.tzinfo is None:
+            next_ping = tz.localize(next_ping)
+        next_ping = next_ping.astimezone(pytz.utc)
+
+        # Insert the reminder with ghost flag
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute('''
+                INSERT INTO reminders (
+                    guild_id, channel_id, user_id, target_ids, target_type,
+                    message, interval, time_unit, last_ping, next_ping,
+                    dm, recurring, active, ghost_ping
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                interaction.guild_id, 
+                channel_id,
+                interaction.user.id,
+                ','.join(map(str, target_ids)),
+                target_type,
+                message,
+                interval,
+                time_unit,
+                now.astimezone(pytz.utc).isoformat(),  # Store in UTC
+                next_ping.isoformat(),
+                False,  # DM not allowed for ghost pings
+                True,  # Always recurring for interval-based pings
+                True,
+                True  # This is a ghost ping
+            ))
+            await db.commit()
+            
+            # Get the ID of the inserted reminder
+            cursor = await db.execute('SELECT last_insert_rowid()')
+            row = await cursor.fetchone()
+            reminder_id = row[0]
+
+        # Get targets for display
+        targets_display = []
+        for tid in target_ids:
+            if target_type == 'user':
+                target = interaction.guild.get_member(int(tid))
+            else:
+                target = interaction.guild.get_role(int(tid))
+            if target:
+                targets_display.append(target.mention)
+
+        # Get channel for display
+        channel_display = interaction.guild.get_channel(channel_id)
+
+        embed = discord.Embed(
+            title="👻 New Ghost Ping Created",
+            description=f"**ID:** #{reminder_id}\n" +
+                       f"**Interval:** Every {interval} {time_unit}\n" +
+                       f"**To:** {', '.join(targets_display) or 'No targets'}\n" +
+                       f"**Where:** 📢 {channel_display.mention if channel_display else 'Unknown'}\n" +
+                       f"**Message:** {message}",
+            color=discord.Color.purple()
+        )
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        logger.error(f"Error in ghost_ping command: {str(e)}")
+        traceback.print_exc()
+        await interaction.followup.send(
+            "An error occurred while creating the ghost ping. Please try again later.",
             ephemeral=True
         )
 
