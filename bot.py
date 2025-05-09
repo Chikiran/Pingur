@@ -345,23 +345,166 @@ async def set_channel(
     )
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="addping", description="Add a new ping reminder")
+@bot.tree.command(name="addping", description="Add an interval-based ping (e.g., every X minutes/hours/days)")
 @app_commands.describe(
     targets="Users/Roles to remind (mention them or use IDs)",
-    time="When to send the reminder (e.g., '3pm', '15:00', 'tomorrow 2pm')",
-    message="Message to send with the reminder",
+    interval="Number of time units between pings",
+    time_unit="Time unit (minutes/hours/days)",
+    message="Message to send with the ping",
     dm="Send as DM instead of channel message (only for users)",
-    channel="Channel to send reminder (optional)",
-    recurring="Whether this reminder should repeat daily"
+    channel="Channel to send ping (optional)"
 )
 async def add_ping(
     interaction: discord.Interaction,
     targets: str,
-    time: str,
+    interval: int,
+    time_unit: Literal['minutes', 'hours', 'days'],
     message: str,
     dm: bool = False,
-    channel: Optional[discord.TextChannel] = None,
-    recurring: bool = False
+    channel: Optional[discord.TextChannel] = None
+):
+    # Get server timezone
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT timezone FROM guild_settings WHERE guild_id = ?', 
+                            (interaction.guild_id,)) as cursor:
+            result = await cursor.fetchone()
+            timezone = result[0] if result else 'UTC'
+
+    tz = pytz.timezone(timezone)
+    now = datetime.now(tz)
+
+    # Parse targets (users and roles)
+    target_ids = []
+    target_type = None
+    
+    for word in targets.split():
+        if word.startswith('<@&'):  # Role mention
+            try:
+                role_id = int(word[3:-1])
+                if not target_type:
+                    target_type = 'role'
+                elif target_type != 'role':
+                    await interaction.response.send_message(
+                        "Cannot mix users and roles in the same ping!",
+                        ephemeral=True
+                    )
+                    return
+                target_ids.append(role_id)
+            except ValueError:
+                continue
+        elif word.startswith('<@'):  # User mention
+            try:
+                user_id = int(word[2:-1].replace('!', ''))
+                if not target_type:
+                    target_type = 'user'
+                elif target_type != 'user':
+                    await interaction.response.send_message(
+                        "Cannot mix users and roles in the same ping!",
+                        ephemeral=True
+                    )
+                    return
+                target_ids.append(user_id)
+            except ValueError:
+                continue
+
+    if not target_ids:
+        await interaction.response.send_message(
+            "No valid targets found! Please mention users or roles.",
+            ephemeral=True
+        )
+        return
+
+    if target_type == 'role' and dm:
+        await interaction.response.send_message(
+            "Cannot send DMs to roles! Please use channel mentions for roles.",
+            ephemeral=True
+        )
+        return
+
+    # Get channel ID
+    if channel:
+        channel_id = channel.id
+    elif dm:
+        channel_id = None
+    else:
+        # First try to use the current channel
+        channel_id = interaction.channel_id
+        if not channel_id:
+            # If not in a channel, try to use the default channel
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute('SELECT default_channel_id FROM guild_settings WHERE guild_id = ?', 
+                                    (interaction.guild_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    channel_id = result[0] if result else None
+
+            if not channel_id:
+                await interaction.response.send_message(
+                    "No channel specified and no default channel set! Please specify a channel or use /setchannel to set a default.",
+                    ephemeral=True
+                )
+                return
+
+    # Calculate next ping time
+    interval_minutes = interval * TIME_UNITS[time_unit]
+    next_ping = now + timedelta(minutes=interval_minutes)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('''
+            INSERT INTO reminders (
+                guild_id, channel_id, user_id, target_ids, target_type,
+                message, interval, time_unit, last_ping, next_ping,
+                dm, recurring, active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            interaction.guild_id, 
+            channel_id,
+            interaction.user.id,
+            ','.join(map(str, target_ids)),
+            target_type,
+            message,
+            interval,
+            time_unit,
+            now.isoformat(),
+            next_ping.isoformat(),
+            dm,
+            True,  # Always recurring for interval-based pings
+            True
+        ))
+        reminder_id = (await db.execute('SELECT last_insert_rowid()')).fetchone()[0]
+        await db.commit()
+
+        # Fetch the newly created reminder
+        async with db.execute('SELECT * FROM reminders WHERE id = ?', (reminder_id,)) as cursor:
+            reminder = await cursor.fetchone()
+
+    embed = await create_reminder_embed(interaction, reminder)
+    embed.title = "✅ New Ping Created"
+    embed.add_field(
+        name="⏰ Interval",
+        value=f"Every {interval} {time_unit}",
+        inline=False
+    )
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="addreminder", description="Add a time-based reminder (e.g., daily at 3pm)")
+@app_commands.describe(
+    targets="Users/Roles to remind (mention them or use IDs)",
+    time="When to send the reminder (e.g., '3pm', '15:00')",
+    repeat="How often to repeat the reminder",
+    message="Message to send with the reminder",
+    dm="Send as DM instead of channel message (only for users)",
+    channel="Channel to send reminder (optional)"
+)
+async def add_reminder(
+    interaction: discord.Interaction,
+    targets: str,
+    time: str,
+    repeat: Literal['never', 'daily', 'weekly'],
+    message: str,
+    dm: bool = False,
+    channel: Optional[discord.TextChannel] = None
 ):
     # Get server timezone
     async with aiosqlite.connect(DB_PATH) as db:
@@ -375,23 +518,19 @@ async def add_ping(
 
     try:
         # Parse the time string
-        if time.lower() == 'tomorrow':
-            target_time = now.replace(hour=9, minute=0) + timedelta(days=1)
-        elif 'tomorrow' in time.lower():
-            time_part = time.lower().replace('tomorrow', '').strip()
-            parsed_time = datetime.strptime(time_part, '%I%p').time() if 'm' in time_part.lower() else datetime.strptime(time_part, '%H:%M').time()
-            target_time = now.replace(hour=parsed_time.hour, minute=parsed_time.minute) + timedelta(days=1)
+        if 'm' in time.lower():
+            parsed_time = datetime.strptime(time, '%I%p').time()
         else:
-            parsed_time = datetime.strptime(time, '%I%p').time() if 'm' in time.lower() else datetime.strptime(time, '%H:%M').time()
-            target_time = now.replace(hour=parsed_time.hour, minute=parsed_time.minute)
-            if target_time < now:
-                target_time += timedelta(days=1)
+            parsed_time = datetime.strptime(time, '%H:%M').time()
+        
+        target_time = now.replace(hour=parsed_time.hour, minute=parsed_time.minute)
+        if target_time < now:
+            target_time += timedelta(days=1)
     except ValueError:
         await interaction.response.send_message(
             "❌ Invalid time format! Examples:\n" +
-            "• `3pm` - Today at 3 PM\n" +
-            "• `15:00` - Today at 3 PM (24h format)\n" +
-            "• `tomorrow 2pm` - Tomorrow at 2 PM",
+            "• `3pm` - At 3 PM\n" +
+            "• `15:00` - At 3 PM (24h format)",
             ephemeral=True
         )
         return
@@ -467,15 +606,16 @@ async def add_ping(
                 )
                 return
 
-    # Calculate interval if recurring
-    if recurring:
+    # Set interval based on repeat type
+    if repeat == 'never':
+        interval = int((target_time - now).total_seconds() / 60)
+        recurring = False
+    elif repeat == 'daily':
         interval = 1440  # 24 hours in minutes
-        time_unit = 'minutes'
-    else:
-        # Calculate minutes until target time
-        delta = target_time - now
-        interval = int(delta.total_seconds() / 60)
-        time_unit = 'minutes'
+        recurring = True
+    else:  # weekly
+        interval = 10080  # 7 days in minutes
+        recurring = True
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('''
@@ -493,7 +633,7 @@ async def add_ping(
             target_type,
             message,
             interval,
-            time_unit,
+            'minutes',
             now.isoformat(),
             target_time.isoformat(),
             dm,
@@ -510,8 +650,8 @@ async def add_ping(
     embed = await create_reminder_embed(interaction, reminder)
     embed.title = "✅ New Reminder Created"
     embed.add_field(
-        name="🕒 Timezone Info",
-        value=f"Server timezone: {timezone}\nNext reminder: {target_time.strftime('%I:%M %p %Z')}",
+        name="🕒 Schedule",
+        value=f"At {target_time.strftime('%I:%M %p')} {timezone}\nRepeat: {repeat}",
         inline=False
     )
     
@@ -606,10 +746,11 @@ async def use_template(
             return
 
         # Create the reminder using the template
-        await add_ping(
+        await add_reminder(
             interaction=interaction,
             targets=final_targets,
             time=final_time,
+            repeat=template[5],
             message=template[2],  # template message
             dm=dm,
             channel=channel
@@ -735,26 +876,25 @@ async def help_command(
         embeds = {
             'addping': discord.Embed(
                 title="📌 Add Ping Command",
-                description="Create a new reminder to ping users or roles",
+                description="Create an interval-based ping that repeats at fixed intervals",
                 color=discord.Color.blue()
             ).add_field(
                 name="Usage",
                 value=(
-                    "`/addping targets:@users/roles time:3pm "
+                    "`/addping targets:@users/roles interval:number time_unit:[minutes/hours/days] "
                     "message:your message`\n"
-                    "Optional: `dm:True/False channel:#channel "
-                    "recurring:True/False`"
+                    "Optional: `dm:True/False channel:#channel`"
                 ),
                 inline=False
             ).add_field(
                 name="Examples",
                 value=(
-                    "1. `/addping targets:@user time:3pm "
+                    "1. `/addping targets:@user interval:30 time_unit:minutes "
                     "message:Time for a break!`\n"
-                    "2. `/addping targets:@role time:9am "
-                    "message:Daily reminder channel:#announcements recurring:true`\n"
-                    "3. `/addping targets:@user time:2pm "
-                    "dm:true message:Take your medicine`"
+                    "2. `/addping targets:@role interval:2 time_unit:hours "
+                    "message:Status update? channel:#team-chat`\n"
+                    "3. `/addping targets:@user interval:1 time_unit:days "
+                    "dm:true message:Daily medication reminder`"
                 ),
                 inline=False
             ),
@@ -891,7 +1031,8 @@ async def help_command(
     embed.add_field(
         name="⚡ Quick Command Guide",
         value=(
-            "`/addping` - Create new reminder\n"
+            "`/addping` - Create interval-based ping\n"
+            "`/addreminder` - Create time-based reminder\n"
             "`/listpings` - View all reminders\n"
             "`/editping` - Modify reminder\n"
             "`/removeping` - Delete reminder\n"
@@ -911,7 +1052,8 @@ async def help_command(
     embed.add_field(
         name="💡 Tips",
         value=(
-            "• Use `/addping` with time like '3pm' or 'tomorrow 2pm'\n"
+            "• Use `/addping` for interval-based pings (every X minutes/hours)\n"
+            "• Use `/addreminder` for time-based reminders (daily at 3pm)\n"
             "• Create templates for common reminders\n"
             "• Set a default channel for convenience\n"
             "• Use the timezone setting for accurate timing"
