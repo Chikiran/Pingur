@@ -570,9 +570,9 @@ async def add_ping(
                 INSERT INTO reminders (
                     guild_id, channel_id, user_id, target_ids, target_type,
                     message, interval, time_unit, last_ping, next_ping,
-                    dm, recurring, active
+                    dm, recurring, active, ghost_ping
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 interaction.guild_id, 
                 channel_id,
@@ -581,12 +581,13 @@ async def add_ping(
                 target_type,
                 message,
                 interval,
-                time_unit,
-                now.astimezone(pytz.utc).isoformat(),  # Store in UTC
+                'minutes',
+                now.isoformat(),
                 next_ping.isoformat(),
                 dm,
                 True,  # Always recurring for interval-based pings
-                True
+                True,
+                False  # Not a ghost ping
             ))
             await db.commit()
             
@@ -798,9 +799,9 @@ async def add_reminder(
                 INSERT INTO reminders (
                     guild_id, channel_id, user_id, target_ids, target_type,
                     message, interval, time_unit, last_ping, next_ping,
-                    dm, recurring, active
+                    dm, recurring, active, ghost_ping
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 interaction.guild_id, 
                 channel_id,
@@ -814,7 +815,8 @@ async def add_reminder(
                 target_time.isoformat(),
                 dm,
                 recurring,
-                True
+                True,
+                False  # Not a ghost ping
             ))
             await db.commit()
 
@@ -1144,13 +1146,15 @@ async def check_reminders():
                                 sent_message = await channel.send(f'{mentions} {message}')
                                 
                                 # Only delete if this is explicitly a ghost ping
-                                if ghost_ping and sent_message:
+                                if ghost_ping:
                                     try:
                                         await asyncio.sleep(0.1)  # Brief delay to ensure the ping goes through
                                         await sent_message.delete()
                                         logger.info(f"Successfully deleted ghost ping message for reminder {id}")
                                     except Exception as e:
                                         logger.error(f'Failed to delete ghost ping message for reminder {id}: {str(e)}')
+                                else:
+                                    logger.info(f"Successfully sent regular ping for reminder {id}")
 
                         # Update last ping and next ping times
                         if recurring:
