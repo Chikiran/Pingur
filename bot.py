@@ -964,102 +964,79 @@ async def list_reminders(
 @tasks.loop(seconds=30)  # Check more frequently for accuracy
 async def check_reminders():
     """Check and send reminders"""
-    try:
-        now = datetime.now(pytz.utc)  # Get current time in UTC
-        logger.info("Starting reminder check...")
-        
-        async with aiosqlite.connect(DB_PATH) as db:
-            # Get all active reminders that need to be triggered
-            async with db.execute('''
-                SELECT r.*, g.timezone 
-                FROM reminders r
-                LEFT JOIN guild_settings g ON r.guild_id = g.guild_id
-                WHERE r.active = 1 
-                AND r.next_ping <= ?
-            ''', (now.isoformat(),)) as cursor:
-                reminders = await cursor.fetchall()
-                
-            logger.info(f"Found {len(reminders)} reminders to process")
+    now = datetime.now(pytz.utc)  # Get current time in UTC
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Get all active reminders that need to be triggered
+        async with db.execute('''
+            SELECT r.*, g.timezone 
+            FROM reminders r
+            LEFT JOIN guild_settings g ON r.guild_id = g.guild_id
+            WHERE r.active = 1 
+            AND r.next_ping <= ?
+        ''', (now.isoformat(),)) as cursor:
+            reminders = await cursor.fetchall()
             
-            for reminder in reminders:
-                try:
-                    id, guild_id, channel_id, user_id, target_ids, target_type, message, interval, time_unit, last_ping, next_ping, is_dm, active, is_recurring, created_at, timezone = reminder
+        for reminder in reminders:
+            id, guild_id, channel_id, user_id, target_ids, target_type, message, interval, time_unit, last_ping, next_ping, is_dm, active, is_recurring, created_at, timezone = reminder
+            
+            guild = bot.get_guild(guild_id)
+            if not guild:
+                continue
+
+            # Get targets (users or roles)
+            targets = []
+            for target_id in target_ids.split(','):
+                if target_type == 'user':
+                    target = guild.get_member(int(target_id))
+                    if target:
+                        targets.append(target)
+                else:
+                    role = guild.get_role(int(target_id))
+                    if role:
+                        targets.append(role)
+
+            if not targets:
+                continue
+
+            try:
+                if is_dm and target_type == 'user':
+                    for target in targets:
+                        await target.send(f'{message}')
+                else:
+                    channel = guild.get_channel(channel_id)
+                    if channel:
+                        mentions = ' '.join(target.mention for target in targets)
+                        await channel.send(f'{mentions} {message}')
+
+                # Update last ping and next ping times
+                if is_recurring:
+                    interval_minutes = interval * TIME_UNITS[time_unit]
+                    # Calculate next ping time, ensuring it's in the future
+                    next_ping_time = now
+                    while next_ping_time <= now:
+                        next_ping_time += timedelta(minutes=interval_minutes)
                     
-                    guild = bot.get_guild(guild_id)
-                    if not guild:
-                        logger.warning(f"Guild {guild_id} not found for reminder {id}")
-                        continue
-
-                    # Get targets (users or roles)
-                    targets = []
-                    for target_id in target_ids.split(','):
-                        if target_type == 'user':
-                            target = guild.get_member(int(target_id))
-                            if target:
-                                targets.append(target)
-                            else:
-                                logger.warning(f"User {target_id} not found in guild {guild.name}")
-                        else:
-                            role = guild.get_role(int(target_id))
-                            if role:
-                                targets.append(role)
-                            else:
-                                logger.warning(f"Role {target_id} not found in guild {guild.name}")
-
-                    if not targets:
-                        logger.warning(f"No valid targets found for reminder {id}")
-                        continue
-
-                    try:
-                        if is_dm and target_type == 'user':
-                            for target in targets:
-                                await target.send(f'{message}')
-                                logger.info(f"Sent DM to {target.name} for reminder {id}")
-                        else:
-                            channel = guild.get_channel(channel_id)
-                            if channel:
-                                mentions = ' '.join(target.mention for target in targets)
-                                await channel.send(f'{mentions} {message}')
-                                logger.info(f"Sent message in {channel.name} for reminder {id}")
-                            else:
-                                logger.warning(f"Channel {channel_id} not found in guild {guild.name}")
-
-                        # Update last ping and next ping times
-                        if is_recurring:
-                            interval_minutes = interval * TIME_UNITS[time_unit]
-                            # Calculate next ping time, ensuring it's in the future
-                            next_ping_time = now
-                            while next_ping_time <= now:
-                                next_ping_time += timedelta(minutes=interval_minutes)
-                            
-                            await db.execute('''
-                                UPDATE reminders 
-                                SET last_ping = ?, next_ping = ?
-                                WHERE id = ?
-                            ''', (now.isoformat(), next_ping_time.isoformat(), id))
-                            logger.info(f"Updated recurring reminder {id}, next ping at {next_ping_time}")
-                        else:
-                            # For one-time reminders, deactivate after sending
-                            await db.execute('''
-                                UPDATE reminders 
-                                SET active = 0, last_ping = ?
-                                WHERE id = ?
-                            ''', (now.isoformat(), id))
-                            logger.info(f"Deactivated one-time reminder {id}")
-                        
-                        await db.commit()
-                    except discord.Forbidden as e:
-                        logger.error(f"Permission error for reminder {id} in guild {guild.name}: {str(e)}")
-                    except Exception as e:
-                        logger.error(f"Error processing reminder {id}: {str(e)}")
-                        traceback.print_exc()
-                except Exception as e:
-                    logger.error(f"Error processing reminder data: {str(e)}")
-                    traceback.print_exc()
-                    continue
-    except Exception as e:
-        logger.error(f"Error in check_reminders task: {str(e)}")
-        traceback.print_exc()
+                    await db.execute('''
+                        UPDATE reminders 
+                        SET last_ping = ?, next_ping = ?
+                        WHERE id = ?
+                    ''', (now.isoformat(), next_ping_time.isoformat(), id))
+                else:
+                    # For one-time reminders, deactivate after sending
+                    await db.execute('''
+                        UPDATE reminders 
+                        SET active = 0, last_ping = ?
+                        WHERE id = ?
+                    ''', (now.isoformat(), id))
+                
+                await db.commit()
+                logger.info(f"Successfully processed reminder {id} for guild {guild.name}")
+            except discord.Forbidden:
+                logger.error(f'Failed to send message to targets in guild {guild.name} - Missing permissions')
+            except Exception as e:
+                logger.error(f'Error processing reminder {id}: {str(e)}')
+                traceback.print_exc()
 
 @check_reminders.before_loop
 async def before_check_reminders():
