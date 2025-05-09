@@ -1037,7 +1037,7 @@ async def check_reminders():
                 reminders = await cursor.fetchall()
 
             for reminder in reminders:
-                id, guild_id, channel_id, user_id, target_ids_str, target_type, message, interval, time_unit, last_ping, next_ping, is_dm, recurring, active, ghost_ping = reminder
+                id, guild_id, channel_id, user_id, target_ids_str, target_type, message, interval, time_unit, last_ping, next_ping, is_dm, active, recurring, ghost_ping, created_at = reminder
                 
                 guild = bot.get_guild(guild_id)
                 if not guild:
@@ -1072,6 +1072,7 @@ async def check_reminders():
                             # If this is a ghost ping, delete it immediately
                             if ghost_ping:
                                 try:
+                                    await asyncio.sleep(0.1)  # Brief delay to ensure the ping goes through
                                     await sent_message.delete()
                                 except Exception as e:
                                     logger.error(f'Failed to delete ghost ping message: {str(e)}')
