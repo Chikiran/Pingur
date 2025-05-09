@@ -77,16 +77,19 @@ class PingurBot(commands.Bot):
         # Then register commands
         try:
             logger.info("Starting command registration...")
-            commands = await self.tree.sync()
-            logger.info(f"Registered {len(commands)} commands")
+            # Sync commands globally
+            await self.tree.sync()
+            logger.info("Global commands synced")
             
-            if not commands:
-                logger.warning("No commands were registered!")
-            else:
-                for cmd in commands:
-                    logger.info(f"Registered command: {cmd.name}")
+            # Sync to all guilds
+            for guild in self.guilds:
+                try:
+                    await self.tree.sync(guild=guild)
+                    logger.info(f"Commands synced to guild: {guild.name}")
+                except Exception as e:
+                    logger.error(f"Failed to sync commands to guild {guild.name}: {e}")
             
-            return commands
+            logger.info("Command registration complete")
         except Exception as e:
             logger.error(f"Command registration failed: {e}")
             raise
@@ -111,8 +114,8 @@ class PingurBot(commands.Bot):
         """Handle new guild joins"""
         logger.info(f"Joined new guild: {guild.name} (ID: {guild.id})")
         try:
-            commands = await self.tree.sync(guild=guild)
-            logger.info(f"Synced {len(commands)} commands to new guild {guild.name}")
+            await self.tree.sync(guild=guild)
+            logger.info(f"Synced commands to new guild {guild.name}")
         except Exception as e:
             logger.error(f"Failed to sync commands to new guild {guild.name}: {e}")
 
