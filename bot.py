@@ -449,7 +449,7 @@ async def add_ping(
     next_ping = now + timedelta(minutes=interval_minutes)
 
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('''
+        cursor = await db.execute('''
             INSERT INTO reminders (
                 guild_id, channel_id, user_id, target_ids, target_type,
                 message, interval, time_unit, last_ping, next_ping,
@@ -471,8 +471,11 @@ async def add_ping(
             True,  # Always recurring for interval-based pings
             True
         ))
-        reminder_id = (await db.execute('SELECT last_insert_rowid()')).fetchone()[0]
         await db.commit()
+        
+        # Fix: Properly await the cursor and its result
+        cursor = await db.execute('SELECT last_insert_rowid()')
+        reminder_id = (await cursor.fetchone())[0]
 
         # Fetch the newly created reminder
         async with db.execute('SELECT * FROM reminders WHERE id = ?', (reminder_id,)) as cursor:
@@ -640,7 +643,6 @@ async def add_reminder(
             recurring,
             True
         ))
-        reminder_id = (await db.execute('SELECT last_insert_rowid()')).fetchone()[0]
         await db.commit()
 
         # Fetch the newly created reminder
