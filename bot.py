@@ -10,6 +10,7 @@ import pytz
 from typing import Optional, List, Literal, Union
 import math
 import sqlite3
+import traceback
 
 # Load environment variables
 load_dotenv()
@@ -40,64 +41,69 @@ class PingurBot(commands.Bot):
         self.default_channels = {}
         self.timezone = "UTC"
         self.reminder_pages = {}
+        print("Bot initialization started...")
+        print(f"Intents configured: {intents.value}")
 
     async def setup_hook(self):
         """Initial setup when bot starts"""
-        print("Setting up the bot...")
+        print("\n=== Bot Setup Starting ===")
+        print(f"Bot User ID: {self.user.id if self.user else 'Not logged in yet'}")
+        print(f"Command Prefix: {self.command_prefix}")
+        print(f"Number of commands: {len(self.tree.get_commands())}")
+        
         try:
-            print("Syncing command tree globally...")
-            # Clear the command tree first
-            self.tree.clear_commands(guild=None)
-            # Sync commands globally first
-            await self.tree.sync(guild=None)
-            print("Global command sync successful!")
+            print("\nAttempting command sync...")
+            # Store commands before sync
+            before_commands = set(cmd.name for cmd in self.tree.get_commands())
+            print(f"Commands before sync: {before_commands}")
             
-            # Then sync to each guild individually
-            for guild in self.guilds:
-                try:
-                    print(f"Syncing commands to guild: {guild.name} (ID: {guild.id})")
-                    self.tree.clear_commands(guild=guild)
-                    await self.tree.sync(guild=guild)
-                    print(f"Successfully synced commands to {guild.name}")
-                except Exception as e:
-                    print(f"Failed to sync commands to guild {guild.name}: {str(e)}")
+            # Clear and sync
+            self.tree.clear_commands(guild=None)
+            await self.tree.sync()
+            
+            # Store commands after sync
+            after_commands = set(cmd.name for cmd in self.tree.get_commands())
+            print(f"Commands after sync: {after_commands}")
+            
+            # Check what changed
+            new_commands = after_commands - before_commands
+            removed_commands = before_commands - after_commands
+            print(f"New commands: {new_commands}")
+            print(f"Removed commands: {removed_commands}")
             
             self.initial_sync_done = True
+            print("\n=== Bot Setup Completed ===")
         except Exception as e:
-            print(f"Failed to perform initial command sync: {str(e)}")
-            print(f"Error type: {type(e)}")
-            print("Bot will continue starting up, but commands may not work properly")
+            print("\n!!! Command Sync Failed !!!")
+            print(f"Error type: {type(e).__name__}")
+            print(f"Error message: {str(e)}")
+            print("Traceback:")
+            traceback.print_exc()
+            print("\n=== Bot Setup Failed ===")
 
     async def on_ready(self):
         """Called when bot is ready"""
-        print(f'Logged in as {self.user} (ID: {self.user.id})')
-        print('------')
+        print("\n=== Bot Ready Event ===")
+        print(f"Logged in as: {self.user} (ID: {self.user.id})")
+        print(f"Connected to {len(self.guilds)} guilds")
+        
+        for guild in self.guilds:
+            print(f"\nGuild: {guild.name} (ID: {guild.id})")
+            print(f"Bot's roles: {', '.join(role.name for role in guild.me.roles)}")
+            print(f"Bot's permissions: {guild.me.guild_permissions.value}")
         
         if not self.initial_sync_done:
             try:
-                print("Attempting additional command sync...")
-                # Clear commands first
-                self.tree.clear_commands(guild=None)
-                # Sync globally
-                await self.tree.sync(guild=None)
-                print("Additional global command sync completed!")
-                
-                # Sync to each guild
-                for guild in self.guilds:
-                    try:
-                        self.tree.clear_commands(guild=guild)
-                        await self.tree.sync(guild=guild)
-                        print(f"Synced commands to guild: {guild.name}")
-                    except Exception as e:
-                        print(f"Failed to sync commands to guild {guild.name}: {str(e)}")
-                
+                print("\nAttempting additional command sync...")
+                await self.tree.sync()
+                print("Additional sync completed")
                 self.initial_sync_done = True
             except Exception as e:
-                print(f"Failed additional command sync: {str(e)}")
-                print(f"Error type: {type(e)}")
+                print(f"Additional sync failed: {str(e)}")
+                traceback.print_exc()
         
-        # Start the reminder check loop
         check_reminders.start()
+        print("\n=== Bot Ready Event Completed ===")
 
 bot = PingurBot()
 
@@ -1151,35 +1157,100 @@ async def on_guild_join(guild):
 # Error handling for command sync issues
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    error_msg = str(error)
-    error_type = type(error).__name__
+    """Enhanced error handling for application commands"""
+    print(f"\n=== Command Error ===")
+    print(f"Command: {interaction.command.name if interaction.command else 'Unknown'}")
+    print(f"Guild: {interaction.guild.name} (ID: {interaction.guild_id})")
+    print(f"User: {interaction.user} (ID: {interaction.user.id})")
+    print(f"Error type: {type(error).__name__}")
+    print(f"Error message: {str(error)}")
+    print("Traceback:")
+    traceback.print_exc()
     
-    print(f"Command error in guild {interaction.guild.name} (ID: {interaction.guild_id})")
-    print(f"Error type: {error_type}")
-    print(f"Error message: {error_msg}")
+    error_embed = discord.Embed(
+        title="❌ Command Error",
+        color=discord.Color.red()
+    )
     
     if isinstance(error, app_commands.CommandNotFound):
-        try:
-            # Attempt to re-sync commands for this guild
-            await bot.tree.sync(guild=interaction.guild)
-            await interaction.response.send_message(
-                "🔄 Attempting to fix command registration. Please try again in a few seconds.",
-                ephemeral=True
-            )
-        except Exception as e:
-            await interaction.response.send_message(
-                "❌ Command not found and re-sync failed. Please contact the bot administrator.",
-                ephemeral=True
-            )
+        error_embed.description = (
+            "Command not found. This might be because:\n"
+            "1. Commands haven't synced properly\n"
+            "2. The bot lacks required permissions\n"
+            "3. Discord's API is having issues\n\n"
+            "Try using `/botdiag` to check the bot's status."
+        )
     elif isinstance(error, app_commands.CommandOnCooldown):
-        await interaction.response.send_message(
-            f"⏳ This command is on cooldown. Try again in {error.retry_after:.2f} seconds.",
-            ephemeral=True
-        )
+        error_embed.description = f"Command on cooldown. Try again in {error.retry_after:.1f}s"
     else:
-        await interaction.response.send_message(
-            f"❌ An error occurred: {error_msg}\nType: {error_type}",
-            ephemeral=True
+        error_embed.description = (
+            f"An error occurred: {str(error)}\n"
+            f"Type: {type(error).__name__}\n\n"
+            "Please try `/botdiag` to check the bot's status."
         )
+    
+    try:
+        await interaction.response.send_message(embed=error_embed, ephemeral=True)
+    except discord.InteractionResponded:
+        await interaction.followup.send(embed=error_embed, ephemeral=True)
+    except Exception as e:
+        print(f"Failed to send error message: {e}")
+
+# Add a diagnostic command
+@bot.tree.command(name="botdiag", description="Check bot's status and permissions")
+async def bot_diagnostics(interaction: discord.Interaction):
+    """Diagnostic command to check bot's status"""
+    try:
+        embed = discord.Embed(
+            title="🔍 Bot Diagnostics",
+            color=discord.Color.blue()
+        )
+        
+        # Bot information
+        embed.add_field(
+            name="Bot Info",
+            value=f"Name: {bot.user.name}\n"
+                  f"ID: {bot.user.id}\n"
+                  f"Latency: {round(bot.latency * 1000)}ms",
+            inline=False
+        )
+        
+        # Guild information
+        guild = interaction.guild
+        embed.add_field(
+            name="Guild Info",
+            value=f"Name: {guild.name}\n"
+                  f"ID: {guild.id}\n"
+                  f"Member count: {guild.member_count}",
+            inline=False
+        )
+        
+        # Bot's permissions
+        permissions = guild.me.guild_permissions
+        perms_list = [perm[0] for perm in permissions if perm[1]]
+        embed.add_field(
+            name="Bot Permissions",
+            value="\n".join(f"✅ {perm}" for perm in perms_list),
+            inline=False
+        )
+        
+        # Command registration status
+        commands = await bot.tree.fetch_commands()
+        embed.add_field(
+            name="Command Registration",
+            value=f"Registered commands: {len(commands)}\n"
+                  f"Names: {', '.join(cmd.name for cmd in commands)}",
+            inline=False
+        )
+        
+        await interaction.response.send_message(embed=embed)
+        
+    except Exception as e:
+        error_embed = discord.Embed(
+            title="❌ Diagnostic Error",
+            description=f"Error type: {type(e).__name__}\nError: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=error_embed)
 
 bot.run(os.getenv('DISCORD_TOKEN')) 
