@@ -32,33 +32,72 @@ intents.message_content = True  # Needed for reaction handling
 
 class PingurBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix='!', intents=intents)
-        self.tree_sync_flag = False
-        self.default_channels = {}  # Guild ID: Channel ID
+        super().__init__(
+            command_prefix='!', 
+            intents=intents
+        )
+        self.initial_sync_done = False
+        self.default_channels = {}
         self.timezone = "UTC"
-        self.reminder_pages = {}  # Store pagination info
+        self.reminder_pages = {}
 
     async def setup_hook(self):
+        """Initial setup when bot starts"""
         print("Setting up the bot...")
         try:
-            print("Syncing command tree...")
+            print("Syncing command tree globally...")
             # Clear the command tree first
-            self._application_commands = []
-            # Force sync all commands
-            await self.tree.sync()
-            print("Command tree synced successfully!")
+            self.tree.clear_commands(guild=None)
+            # Sync commands globally first
+            await self.tree.sync(guild=None)
+            print("Global command sync successful!")
+            
+            # Then sync to each guild individually
+            for guild in self.guilds:
+                try:
+                    print(f"Syncing commands to guild: {guild.name} (ID: {guild.id})")
+                    self.tree.clear_commands(guild=guild)
+                    await self.tree.sync(guild=guild)
+                    print(f"Successfully synced commands to {guild.name}")
+                except Exception as e:
+                    print(f"Failed to sync commands to guild {guild.name}: {str(e)}")
+            
+            self.initial_sync_done = True
         except Exception as e:
-            print(f"Failed to sync command tree: {e}")
+            print(f"Failed to perform initial command sync: {str(e)}")
+            print(f"Error type: {type(e)}")
+            print("Bot will continue starting up, but commands may not work properly")
 
     async def on_ready(self):
+        """Called when bot is ready"""
         print(f'Logged in as {self.user} (ID: {self.user.id})')
         print('------')
-        try:
-            print("Performing additional command sync...")
-            await self.tree.sync()
-            print("Additional command sync completed!")
-        except Exception as e:
-            print(f"Failed additional command sync: {e}")
+        
+        if not self.initial_sync_done:
+            try:
+                print("Attempting additional command sync...")
+                # Clear commands first
+                self.tree.clear_commands(guild=None)
+                # Sync globally
+                await self.tree.sync(guild=None)
+                print("Additional global command sync completed!")
+                
+                # Sync to each guild
+                for guild in self.guilds:
+                    try:
+                        self.tree.clear_commands(guild=guild)
+                        await self.tree.sync(guild=guild)
+                        print(f"Synced commands to guild: {guild.name}")
+                    except Exception as e:
+                        print(f"Failed to sync commands to guild {guild.name}: {str(e)}")
+                
+                self.initial_sync_done = True
+            except Exception as e:
+                print(f"Failed additional command sync: {str(e)}")
+                print(f"Error type: {type(e)}")
+        
+        # Start the reminder check loop
+        check_reminders.start()
 
 bot = PingurBot()
 
@@ -531,7 +570,7 @@ async def check_reminders():
             reminders = await cursor.fetchall()
             
         for reminder in reminders:
-            id, guild_id, channel_id, user_id, target_ids, target_type, message, interval, time_unit, last_ping, next_ping, is_dm, category, active, is_recurring, created_at, timezone = reminder
+            id, guild_id, channel_id, user_id, target_ids, target_type, message, interval, time_unit, last_ping, next_ping, is_dm, active, is_recurring, created_at, timezone = reminder
             
             guild = bot.get_guild(guild_id)
             if not guild:
@@ -607,7 +646,7 @@ async def help_command(
                 value=(
                     "`/addping targets:<@users/roles> interval:<number> "
                     "time_unit:[minutes/hours/days] message:<text>`\n"
-                    "Optional: `is_dm:True/False channel:#channel category:<text> "
+                    "Optional: `is_dm:True/False channel:#channel "
                     "is_recurring:True/False`"
                 ),
                 inline=False
@@ -636,7 +675,6 @@ async def help_command(
                     "- `interval` and `time_unit`\n"
                     "- `message`\n"
                     "- `channel`\n"
-                    "- `category`\n"
                     "- `is_dm`\n"
                     "- `active`\n"
                     "- `is_recurring`"
@@ -661,7 +699,6 @@ async def help_command(
                 value=(
                     "`/listpings`\n"
                     "Optional filters:\n"
-                    "- `category:<text>`\n"
                     "- `show_inactive:True/False`\n"
                     "- `target:@user/@role`"
                 ),
@@ -670,7 +707,7 @@ async def help_command(
                 name="Features",
                 value=(
                     "- Page through reminders with buttons\n"
-                    "- Filter by category or target\n"
+                    "- Filter by target\n"
                     "- View active/inactive reminders\n"
                     "- Detailed view of each reminder"
                 ),
@@ -1099,31 +1136,50 @@ except Exception as e:
 # Register commands before running the bot
 @bot.event
 async def on_guild_join(guild):
+    """Handle new guild joins"""
     print(f"Joined new guild: {guild.name} (ID: {guild.id})")
     try:
+        # Clear existing commands for this guild
+        bot.tree.clear_commands(guild=guild)
+        # Sync commands to the new guild
         await bot.tree.sync(guild=guild)
-        print(f"Synced commands for guild: {guild.name}")
+        print(f"Successfully synced commands to new guild: {guild.name}")
     except Exception as e:
-        print(f"Failed to sync commands for guild {guild.name}: {e}")
+        print(f"Failed to sync commands for new guild {guild.name}: {str(e)}")
+        print(f"Error type: {type(e)}")
 
 # Error handling for command sync issues
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    error_msg = str(error)
+    error_type = type(error).__name__
+    
+    print(f"Command error in guild {interaction.guild.name} (ID: {interaction.guild_id})")
+    print(f"Error type: {error_type}")
+    print(f"Error message: {error_msg}")
+    
     if isinstance(error, app_commands.CommandNotFound):
-        await interaction.response.send_message(
-            "❌ This command is not properly registered. Please wait a moment and try again.",
-            ephemeral=True
-        )
+        try:
+            # Attempt to re-sync commands for this guild
+            await bot.tree.sync(guild=interaction.guild)
+            await interaction.response.send_message(
+                "🔄 Attempting to fix command registration. Please try again in a few seconds.",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                "❌ Command not found and re-sync failed. Please contact the bot administrator.",
+                ephemeral=True
+            )
     elif isinstance(error, app_commands.CommandOnCooldown):
         await interaction.response.send_message(
-            f"❌ This command is on cooldown. Try again in {error.retry_after:.2f} seconds.",
+            f"⏳ This command is on cooldown. Try again in {error.retry_after:.2f} seconds.",
             ephemeral=True
         )
     else:
         await interaction.response.send_message(
-            f"❌ An error occurred: {str(error)}",
+            f"❌ An error occurred: {error_msg}\nType: {error_type}",
             ephemeral=True
         )
-        print(f"Command error in {interaction.guild.name}: {str(error)}")
 
 bot.run(os.getenv('DISCORD_TOKEN')) 
