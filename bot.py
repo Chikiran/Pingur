@@ -1175,8 +1175,9 @@ async def help_command(
         inline=False
     )
 
-    # Only show owner commands if the user is the owner
-    if interaction.user.id == interaction.client._app_owner_id:
+    # Check if user is owner and show owner commands
+    app_info = await interaction.client.application_info()
+    if interaction.user.id == app_info.owner.id:
         embed.add_field(
             name="🔧 Owner Commands",
             value=(
@@ -1586,12 +1587,10 @@ async def remove_ping(interaction: discord.Interaction):
 
 def is_bot_owner():
     async def predicate(interaction: discord.Interaction):
-        # Get the application info only once and cache it
-        if not hasattr(interaction.client, '_app_owner_id'):
-            app_info = await interaction.client.application_info()
-            interaction.client._app_owner_id = app_info.owner.id
-        
-        return interaction.user.id == interaction.client._app_owner_id
+        app_info = await interaction.client.application_info()
+        if interaction.user.id != app_info.owner.id:
+            raise app_commands.CheckFailure("This command is only available to the bot owner.")
+        return True
     return app_commands.check(predicate)
 
 @bot.tree.command(name="setstatus", description="Set the bot's status (Owner only)")
