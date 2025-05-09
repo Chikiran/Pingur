@@ -1089,7 +1089,8 @@ async def help_command(
     command: Optional[Literal[
         'addping', 'editping', 'removeping', 'list',
         'setchannel', 'settimezone', 'savetemplate', 'usetemplate',
-        'pauseping', 'pauseall', 'resumeping'
+        'pauseping', 'pauseall', 'resumeping',
+        'setstatus', 'setnick', 'setavatar', 'setbio'
     ]] = None
 ):
     if command:
@@ -1174,18 +1175,18 @@ async def help_command(
         inline=False
     )
 
-    # Tips
-    embed.add_field(
-        name="💡 Tips",
-        value=(
-            "• Use `/addping` for interval-based pings (every X minutes/hours)\n"
-            "• Use `/addreminder` for time-based reminders (daily at 3pm)\n"
-            "• Create templates for common reminders\n"
-            "• Set a default channel for convenience\n"
-            "• Use the timezone setting for accurate timing"
-        ),
-        inline=False
-    )
+    # Only show owner commands if the user is the owner
+    if interaction.user.id == interaction.client._app_owner_id:
+        embed.add_field(
+            name="🔧 Owner Commands",
+            value=(
+                "`/setstatus` - Set bot's activity status\n"
+                "`/setnick` - Change bot's nickname\n"
+                "`/setavatar` - Update bot's profile picture\n"
+                "`/setbio` - Update bot's 'About Me' description"
+            ),
+            inline=False
+        )
 
     # Get detailed help
     embed.add_field(
@@ -1585,11 +1586,12 @@ async def remove_ping(interaction: discord.Interaction):
 
 def is_bot_owner():
     async def predicate(interaction: discord.Interaction):
-        application = await interaction.client.application_info()
-        if interaction.user.id != application.owner.id:
-            await interaction.response.send_message("❌ This command is restricted to the bot owner.", ephemeral=True)
-            return False
-        return True
+        # Get the application info only once and cache it
+        if not hasattr(interaction.client, '_app_owner_id'):
+            app_info = await interaction.client.application_info()
+            interaction.client._app_owner_id = app_info.owner.id
+        
+        return interaction.user.id == interaction.client._app_owner_id
     return app_commands.check(predicate)
 
 @bot.tree.command(name="setstatus", description="Set the bot's status (Owner only)")
