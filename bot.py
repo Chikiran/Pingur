@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import pytz
 from typing import Optional, List, Literal, Union
 import math
+import sqlite3
 
 # Load environment variables
 load_dotenv()
@@ -60,10 +61,9 @@ async def setup_database():
                 time_unit TEXT DEFAULT 'minutes',
                 last_ping TIMESTAMP,
                 next_ping TIMESTAMP,
-                is_dm BOOLEAN,
-                category TEXT DEFAULT 'general',
+                dm BOOLEAN DEFAULT false,
                 active BOOLEAN DEFAULT true,
-                is_recurring BOOLEAN DEFAULT true,
+                recurring BOOLEAN DEFAULT true,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -84,8 +84,8 @@ async def setup_database():
                 guild_id INTEGER,
                 name TEXT,
                 message TEXT,
-                interval INTEGER,
-                category TEXT,
+                time TEXT,
+                targets TEXT,
                 UNIQUE(guild_id, name)
             )
         ''')
@@ -105,7 +105,7 @@ def format_time(minutes: int) -> str:
 
 async def create_reminder_embed(interaction: discord.Interaction, reminder: tuple, show_controls: bool = False) -> discord.Embed:
     """Create an embed for a reminder"""
-    rid, guild_id, channel_id, user_id, target_ids, target_type, msg, interval, time_unit, last_ping, next_ping, is_dm, category, active, is_recurring, created_at = reminder
+    rid, guild_id, channel_id, user_id, target_ids, target_type, msg, interval, time_unit, last_ping, next_ping, dm, active, recurring, created_at = reminder
     
     embed = discord.Embed(
         title=f"Reminder #{rid}",
@@ -135,19 +135,19 @@ async def create_reminder_embed(interaction: discord.Interaction, reminder: tupl
         name="⏰ Timing",
         value=(
             f"Interval: {format_time(interval)}\n"
-            f"Type: {'Recurring' if is_recurring else 'One-time'}\n"
+            f"Type: {'Recurring' if recurring else 'One-time'}\n"
             f"Next ping: <t:{int(datetime.fromisoformat(next_ping).timestamp())}:R>"
         ),
         inline=True
     )
     embed.add_field(
         name="📍 Location",
-        value=f"Channel: {channel.mention if channel else 'Unknown'}\nDM: {is_dm}",
+        value=f"Channel: {channel.mention if channel else 'Unknown'}\nDM: {dm}",
         inline=True
     )
     embed.add_field(
         name="ℹ️ Details",
-        value=f"Category: {category}\nStatus: {'🟢 Active' if active else '🔴 Inactive'}",
+        value=f"Status: {'🟢 Active' if active else '🔴 Inactive'}",
         inline=True
     )
     embed.add_field(
@@ -170,28 +170,81 @@ async def create_reminder_embed(interaction: discord.Interaction, reminder: tupl
 
     return embed
 
-@bot.tree.command(name="addping", description="Add a new ping reminder")
+@bot.tree.command(name="setchannel", description="Set the default channel for reminders in this server")
 @app_commands.describe(
-    targets="Users/Roles to ping (mention them or use IDs)",
-    time_unit="Unit of time for interval",
-    interval="Time between pings",
-    message="Message to send with the ping",
-    is_dm="Send as DM instead of channel message (only for users)",
-    channel="Channel to send pings (optional)",
-    category="Category for organizing reminders",
-    is_recurring="Whether this reminder should repeat",
+    channel="The channel to use for reminders by default"
 )
-async def add_ping(
+async def set_channel(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('''
+            INSERT INTO guild_settings (guild_id, default_channel_id)
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) 
+            DO UPDATE SET default_channel_id = excluded.default_channel_id
+        ''', (interaction.guild_id, channel.id))
+        await db.commit()
+
+    embed = discord.Embed(
+        title="✅ Default Channel Set",
+        description=f"Default reminder channel set to {channel.mention}",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="addreminder", description="Add a new reminder with timezone support")
+@app_commands.describe(
+    targets="Users/Roles to remind (mention them or use IDs)",
+    time="When to send the reminder (e.g., '3pm', '15:00', 'tomorrow 2pm')",
+    message="Message to send with the reminder",
+    dm="Send as DM instead of channel message (only for users)",
+    channel="Channel to send reminder (optional)",
+    recurring="Whether this reminder should repeat daily"
+)
+async def add_reminder(
     interaction: discord.Interaction,
     targets: str,
-    time_unit: Literal['minutes', 'hours', 'days'],
-    interval: int,
+    time: str,
     message: str,
-    is_dm: bool = False,
+    dm: bool = False,
     channel: Optional[discord.TextChannel] = None,
-    category: str = "general",
-    is_recurring: bool = True
+    recurring: bool = False
 ):
+    # Get server timezone
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT timezone FROM guild_settings WHERE guild_id = ?', 
+                            (interaction.guild_id,)) as cursor:
+            result = await cursor.fetchone()
+            timezone = result[0] if result else 'UTC'
+
+    tz = pytz.timezone(timezone)
+    now = datetime.now(tz)
+
+    try:
+        # Parse the time string
+        if time.lower() == 'tomorrow':
+            target_time = now.replace(hour=9, minute=0) + timedelta(days=1)
+        elif 'tomorrow' in time.lower():
+            time_part = time.lower().replace('tomorrow', '').strip()
+            parsed_time = datetime.strptime(time_part, '%I%p').time() if 'm' in time_part.lower() else datetime.strptime(time_part, '%H:%M').time()
+            target_time = now.replace(hour=parsed_time.hour, minute=parsed_time.minute) + timedelta(days=1)
+        else:
+            parsed_time = datetime.strptime(time, '%I%p').time() if 'm' in time.lower() else datetime.strptime(time, '%H:%M').time()
+            target_time = now.replace(hour=parsed_time.hour, minute=parsed_time.minute)
+            if target_time < now:
+                target_time += timedelta(days=1)
+    except ValueError:
+        await interaction.response.send_message(
+            "❌ Invalid time format! Examples:\n" +
+            "• `3pm` - Today at 3 PM\n" +
+            "• `15:00` - Today at 3 PM (24h format)\n" +
+            "• `tomorrow 2pm` - Tomorrow at 2 PM",
+            ephemeral=True
+        )
+        return
+
     # Parse targets (users and roles)
     target_ids = []
     target_type = None
@@ -225,34 +278,6 @@ async def add_ping(
                 target_ids.append(user_id)
             except ValueError:
                 continue
-        else:  # Try as direct ID
-            try:
-                user_id = int(word)
-                member = interaction.guild.get_member(user_id)
-                if member:
-                    if not target_type:
-                        target_type = 'user'
-                    elif target_type != 'user':
-                        await interaction.response.send_message(
-                            "Cannot mix users and roles in the same reminder!",
-                            ephemeral=True
-                        )
-                        return
-                    target_ids.append(user_id)
-                else:
-                    role = interaction.guild.get_role(user_id)
-                    if role:
-                        if not target_type:
-                            target_type = 'role'
-                        elif target_type != 'role':
-                            await interaction.response.send_message(
-                                "Cannot mix users and roles in the same reminder!",
-                                ephemeral=True
-                            )
-                            return
-                        target_ids.append(user_id)
-            except ValueError:
-                continue
 
     if not target_ids:
         await interaction.response.send_message(
@@ -261,7 +286,7 @@ async def add_ping(
         )
         return
 
-    if target_type == 'role' and is_dm:
+    if target_type == 'role' and dm:
         await interaction.response.send_message(
             "Cannot send DMs to roles! Please use channel mentions for roles.",
             ephemeral=True
@@ -272,25 +297,35 @@ async def add_ping(
     if channel:
         channel_id = channel.id
     else:
-        channel_id = bot.default_channels.get(interaction.guild_id)
-        if not channel_id and not is_dm:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('SELECT default_channel_id FROM guild_settings WHERE guild_id = ?', 
+                                (interaction.guild_id,)) as cursor:
+                result = await cursor.fetchone()
+                channel_id = result[0] if result else None
+
+        if not channel_id and not dm:
             await interaction.response.send_message(
                 "No default channel set! Use /setchannel first or specify a channel.",
                 ephemeral=True
             )
             return
 
-    # Calculate interval in minutes and next ping time
-    interval_minutes = interval * TIME_UNITS[time_unit]
-    now = datetime.now()
-    next_ping = now + timedelta(minutes=interval_minutes)
+    # Calculate interval if recurring
+    if recurring:
+        interval = 1440  # 24 hours in minutes
+        time_unit = 'minutes'
+    else:
+        # Calculate minutes until target time
+        delta = target_time - now
+        interval = int(delta.total_seconds() / 60)
+        time_unit = 'minutes'
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('''
             INSERT INTO reminders (
                 guild_id, channel_id, user_id, target_ids, target_type,
                 message, interval, time_unit, last_ping, next_ping,
-                is_dm, category, is_recurring
+                dm, recurring, active
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
@@ -303,10 +338,10 @@ async def add_ping(
             interval,
             time_unit,
             now.isoformat(),
-            next_ping.isoformat(),
-            is_dm,
-            category,
-            is_recurring
+            target_time.isoformat(),
+            dm,
+            recurring,
+            True
         ))
         reminder_id = (await db.execute('SELECT last_insert_rowid()')).fetchone()[0]
         await db.commit()
@@ -317,348 +352,146 @@ async def add_ping(
 
     embed = await create_reminder_embed(interaction, reminder)
     embed.title = "✅ New Reminder Created"
+    embed.add_field(
+        name="🕒 Timezone Info",
+        value=f"Server timezone: {timezone}\nNext reminder: {target_time.strftime('%I:%M %p %Z')}",
+        inline=False
+    )
     
     await interaction.response.send_message(embed=embed)
 
-class ReminderView(discord.ui.View):
-    def __init__(self, reminders: list, page: int = 0):
-        super().__init__(timeout=300)
-        self.reminders = reminders
-        self.page = page
-        self.max_pages = math.ceil(len(reminders) / ITEMS_PER_PAGE)
-
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.gray, emoji="◀️", disabled=True)
-    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.page = max(0, self.page - 1)
-        await self.update_view(interaction)
-
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.gray, emoji="▶️")
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.page = min(self.max_pages - 1, self.page + 1)
-        await self.update_view(interaction)
-
-    async def update_view(self, interaction: discord.Interaction):
-        # Update button states
-        self.prev_button.disabled = self.page == 0
-        self.next_button.disabled = self.page >= self.max_pages - 1
-
-        # Create embed for current page
-        start_idx = self.page * ITEMS_PER_PAGE
-        page_reminders = self.reminders[start_idx:start_idx + ITEMS_PER_PAGE]
-
-        embed = discord.Embed(
-            title="📋 Reminder List",
-            description=f"Page {self.page + 1} of {self.max_pages}",
-            color=discord.Color.blue()
-        )
-
-        for reminder in page_reminders:
-            sub_embed = await create_reminder_embed(interaction, reminder)
-            # Convert sub_embed to field in main embed
-            embed.add_field(
-                name=f"Reminder #{reminder[0]}",
-                value=sub_embed.fields[-1].value,  # Get the message field
-                inline=False
-            )
-
-        await interaction.response.edit_message(embed=embed, view=self)
-
-@bot.tree.command(name="listpings", description="List all ping reminders")
+@bot.tree.command(name="savetemplate", description="Save a reminder as a template")
 @app_commands.describe(
-    category="Filter by category",
-    show_inactive="Show inactive reminders",
-    target="Filter by specific user/role"
+    name="Name for the template",
+    message="Message for the template",
+    time="Default time for the template (optional)",
+    targets="Default targets for the template (optional)"
 )
-async def list_pings(
+async def save_template(
     interaction: discord.Interaction,
-    category: Optional[str] = None,
-    show_inactive: bool = False,
-    target: Optional[Union[discord.User, discord.Role]] = None
+    name: str,
+    message: str,
+    time: Optional[str] = None,
+    targets: Optional[str] = None
 ):
-    query = '''
-        SELECT *
-        FROM reminders
-        WHERE guild_id = ?
-    '''
-    params = [interaction.guild_id]
-
-    if category:
-        query += ' AND category = ?'
-        params.append(category)
-
-    if not show_inactive:
-        query += ' AND active = 1'
-
-    if target:
-        query += ' AND target_ids LIKE ?'
-        params.append(f'%{target.id}%')
-
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(query, params) as cursor:
-            reminders = await cursor.fetchall()
+        try:
+            await db.execute('''
+                INSERT INTO reminder_templates (guild_id, name, message, time, targets)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (interaction.guild_id, name, message, time, targets))
+            await db.commit()
 
-    if not reminders:
-        if category or target:
+            embed = discord.Embed(
+                title="✅ Template Saved",
+                description=f"Template `{name}` has been saved",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Message", value=message, inline=False)
+            if time:
+                embed.add_field(name="Default Time", value=time, inline=True)
+            if targets:
+                embed.add_field(name="Default Targets", value=targets, inline=True)
+
+            await interaction.response.send_message(embed=embed)
+        except sqlite3.IntegrityError:
             await interaction.response.send_message(
-                '❌ No reminders found matching your criteria!',
+                f"❌ A template named `{name}` already exists!",
                 ephemeral=True
             )
-        else:
-            await interaction.response.send_message(
-                '❌ No reminders found!',
-                ephemeral=True
-            )
-        return
 
-    view = ReminderView(reminders)
-    await view.update_view(interaction)
-
-class ReminderSelect(discord.ui.Select):
-    def __init__(self, reminders, command_type="edit"):
-        options = []
-        for r in reminders:
-            rid, _, _, _, target_ids, target_type, msg, interval, time_unit, _, _, is_dm, category, active, _, _ = r
-            preview = f"#{rid} - {msg[:50]}..." if len(msg) > 50 else f"#{rid} - {msg}"
-            options.append(discord.SelectOption(
-                label=preview,
-                value=str(rid),
-                description=f"{interval} {time_unit}, {'DM' if is_dm else 'Channel'}"
-            ))
-        super().__init__(
-            placeholder=f"Choose a reminder to {command_type}...",
-            options=options[:25]  # Discord limits to 25 options
-        )
-        self.command_type = command_type
-
-    async def callback(self, interaction: discord.Interaction):
-        selected_id = int(self.values[0])
-        
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute('SELECT * FROM reminders WHERE id = ? AND guild_id = ?', 
-                                (selected_id, interaction.guild_id)) as cursor:
-                reminder = await cursor.fetchone()
-
-        if not reminder:
-            await interaction.response.send_message('❌ Reminder not found!', ephemeral=True)
-            return
-
-        embed = await create_reminder_embed(interaction, reminder)
-        
-        if self.command_type == "edit":
-            embed.title = "✏️ Edit this reminder using /editping with the ID"
-            await interaction.response.send_message(
-                f"Selected reminder #{selected_id}",
-                embed=embed,
-                ephemeral=True
-            )
-        else:  # remove
-            embed.title = "🗑️ Confirm Deletion"
-            embed.description = "Are you sure you want to delete this reminder?"
-
-            class ConfirmView(discord.ui.View):
-                def __init__(self):
-                    super().__init__(timeout=60)
-                    self.value = None
-
-                @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger, emoji="✅")
-                async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute('DELETE FROM reminders WHERE id = ? AND guild_id = ?', 
-                                    (selected_id, interaction.guild_id))
-                        await db.commit()
-                    
-                    embed.title = "✅ Reminder Deleted"
-                    embed.description = None
-                    await interaction.response.edit_message(embed=embed, view=None)
-
-                @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey, emoji="❌")
-                async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-                    embed.title = "❌ Deletion Cancelled"
-                    embed.description = None
-                    await interaction.response.edit_message(embed=embed, view=None)
-
-            await interaction.response.send_message(embed=embed, view=ConfirmView(), ephemeral=True)
-
-class ReminderSelectView(discord.ui.View):
-    def __init__(self, reminders, command_type="edit"):
-        super().__init__()
-        self.add_item(ReminderSelect(reminders, command_type))
-
-@bot.tree.command(name="editping", description="Edit a reminder")
+@bot.tree.command(name="usetemplate", description="Create a reminder from a template")
 @app_commands.describe(
-    reminder_id="ID of the reminder to edit",
-    interval="New interval",
-    time_unit="New time unit",
-    message="New message",
-    channel="New channel",
-    category="New category",
-    is_dm="New DM setting",
-    active="Set reminder active/inactive",
-    is_recurring="Set if reminder should repeat"
+    template_name="Name of the template to use",
+    time="Override the default time (optional)",
+    targets="Override the default targets (optional)",
+    dm="Send as DM instead of channel message",
+    channel="Override the default channel"
 )
-async def edit_ping(
+async def use_template(
     interaction: discord.Interaction,
-    reminder_id: Optional[int] = None,
-    interval: Optional[int] = None,
-    time_unit: Optional[Literal['minutes', 'hours', 'days']] = None,
-    message: Optional[str] = None,
-    channel: Optional[discord.TextChannel] = None,
-    category: Optional[str] = None,
-    is_dm: Optional[bool] = None,
-    active: Optional[bool] = None,
-    is_recurring: Optional[bool] = None
+    template_name: str,
+    time: Optional[str] = None,
+    targets: Optional[str] = None,
+    dm: bool = False,
+    channel: Optional[discord.TextChannel] = None
 ):
-    if reminder_id is None:
-        # Show reminder selector
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute('SELECT * FROM reminders WHERE guild_id = ?', 
-                                (interaction.guild_id,)) as cursor:
-                reminders = await cursor.fetchall()
-                
-        if not reminders:
-            await interaction.response.send_message('❌ No reminders found!', ephemeral=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            'SELECT * FROM reminder_templates WHERE guild_id = ? AND name = ?',
+            (interaction.guild_id, template_name)
+        ) as cursor:
+            template = await cursor.fetchone()
+
+        if not template:
+            await interaction.response.send_message(
+                f"❌ Template `{template_name}` not found!",
+                ephemeral=True
+            )
             return
 
+        # Use template values or overrides
+        final_time = time or template[3]
+        final_targets = targets or template[4]
+        
+        if not final_time:
+            await interaction.response.send_message(
+                "❌ No time specified! Please provide a time.",
+                ephemeral=True
+            )
+            return
+
+        if not final_targets:
+            await interaction.response.send_message(
+                "❌ No targets specified! Please provide targets.",
+                ephemeral=True
+            )
+            return
+
+        # Create the reminder using the template
+        await add_reminder(
+            interaction=interaction,
+            targets=final_targets,
+            time=final_time,
+            message=template[2],  # template message
+            dm=dm,
+            channel=channel
+        )
+
+@bot.tree.command(name="listtemplates", description="List all saved reminder templates")
+async def list_templates(interaction: discord.Interaction):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            'SELECT * FROM reminder_templates WHERE guild_id = ?',
+            (interaction.guild_id,)
+        ) as cursor:
+            templates = await cursor.fetchall()
+
+    if not templates:
         await interaction.response.send_message(
-            "Select a reminder to edit:",
-            view=ReminderSelectView(reminders, "edit"),
+            "❌ No templates found! Create one with `/savetemplate`",
             ephemeral=True
         )
         return
 
-    # Rest of the edit logic...
-    async with aiosqlite.connect(DB_PATH) as db:
-        # Get current values
-        async with db.execute('SELECT * FROM reminders WHERE id = ? AND guild_id = ?', 
-                            (reminder_id, interaction.guild_id)) as cursor:
-            reminder = await cursor.fetchone()
-            
-        if not reminder:
-            await interaction.response.send_message('❌ Reminder not found!', ephemeral=True)
-            return
+    embed = discord.Embed(
+        title="📋 Reminder Templates",
+        color=discord.Color.blue()
+    )
 
-        # Build update query
-        query = 'UPDATE reminders SET '
-        params = []
-        updates = []
+    for template in templates:
+        name = template[2]
+        message = template[3]
+        time = template[4] or "Not set"
+        targets = template[5] or "Not set"
 
-        if interval is not None or time_unit is not None:
-            current_interval = interval if interval is not None else reminder[7]
-            current_unit = time_unit if time_unit is not None else reminder[8]
-            minutes = current_interval * TIME_UNITS[current_unit]
-            next_ping = datetime.now() + timedelta(minutes=minutes)
-            
-            if interval is not None:
-                updates.append('interval = ?')
-                params.append(interval)
-            if time_unit is not None:
-                updates.append('time_unit = ?')
-                params.append(time_unit)
-            
-            updates.append('next_ping = ?')
-            params.append(next_ping.isoformat())
+        embed.add_field(
+            name=f"📝 {name}",
+            value=f"Message: {message}\nTime: {time}\nTargets: {targets}",
+            inline=False
+        )
 
-        if message is not None:
-            updates.append('message = ?')
-            params.append(message)
-        if channel is not None:
-            updates.append('channel_id = ?')
-            params.append(channel.id)
-        if category is not None:
-            updates.append('category = ?')
-            params.append(category)
-        if is_dm is not None:
-            updates.append('is_dm = ?')
-            params.append(is_dm)
-        if active is not None:
-            updates.append('active = ?')
-            params.append(active)
-        if is_recurring is not None:
-            updates.append('is_recurring = ?')
-            params.append(is_recurring)
-
-        if not updates:
-            await interaction.response.send_message('❌ No changes specified!', ephemeral=True)
-            return
-
-        query += ', '.join(updates)
-        query += ' WHERE id = ? AND guild_id = ?'
-        params.extend([reminder_id, interaction.guild_id])
-
-        await db.execute(query, params)
-        await db.commit()
-
-        # Fetch updated reminder
-        async with db.execute('SELECT * FROM reminders WHERE id = ?', (reminder_id,)) as cursor:
-            updated_reminder = await cursor.fetchone()
-
-    embed = await create_reminder_embed(interaction, updated_reminder)
-    embed.title = "✅ Reminder Updated"
     await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="removeping", description="Remove a reminder")
-@app_commands.describe(
-    reminder_id="ID of the reminder to remove"
-)
-async def remove_ping(
-    interaction: discord.Interaction,
-    reminder_id: Optional[int] = None
-):
-    if reminder_id is None:
-        # Show reminder selector
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute('SELECT * FROM reminders WHERE guild_id = ?', 
-                                (interaction.guild_id,)) as cursor:
-                reminders = await cursor.fetchall()
-                
-        if not reminders:
-            await interaction.response.send_message('❌ No reminders found!', ephemeral=True)
-            return
-
-        await interaction.response.send_message(
-            "Select a reminder to remove:",
-            view=ReminderSelectView(reminders, "remove"),
-            ephemeral=True
-        )
-        return
-
-    # If reminder_id is provided, handle the removal
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute('SELECT * FROM reminders WHERE id = ? AND guild_id = ?', 
-                            (reminder_id, interaction.guild_id)) as cursor:
-            reminder = await cursor.fetchone()
-
-        if not reminder:
-            await interaction.response.send_message('❌ Reminder not found!', ephemeral=True)
-            return
-
-        embed = await create_reminder_embed(interaction, reminder)
-        embed.title = "🗑️ Confirm Deletion"
-        embed.description = "Are you sure you want to delete this reminder?"
-
-        class ConfirmView(discord.ui.View):
-            def __init__(self):
-                super().__init__(timeout=60)
-                self.value = None
-
-            @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger, emoji="✅")
-            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute('DELETE FROM reminders WHERE id = ? AND guild_id = ?', 
-                                   (reminder_id, interaction.guild_id))
-                    await db.commit()
-                
-                embed.title = "✅ Reminder Deleted"
-                embed.description = None
-                await interaction.response.edit_message(embed=embed, view=None)
-
-            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey, emoji="❌")
-            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-                embed.title = "❌ Deletion Cancelled"
-                embed.description = None
-                await interaction.response.edit_message(embed=embed, view=None)
-
-        await interaction.response.send_message(embed=embed, view=ConfirmView(), ephemeral=True)
 
 @tasks.loop(seconds=30)  # Check more frequently for accuracy
 async def check_reminders():
@@ -899,6 +732,326 @@ async def help_command(
     )
 
     await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="settimezone", description="Set the timezone for this server")
+@app_commands.describe(
+    timezone="The timezone (e.g., 'US/Pacific', 'Europe/London', 'Asia/Tokyo')"
+)
+async def set_timezone(
+    interaction: discord.Interaction,
+    timezone: str
+):
+    try:
+        # Validate timezone
+        pytz.timezone(timezone)
+        
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute('''
+                INSERT INTO guild_settings (guild_id, timezone)
+                VALUES (?, ?)
+                ON CONFLICT(guild_id) 
+                DO UPDATE SET timezone = excluded.timezone
+            ''', (interaction.guild_id, timezone))
+            await db.commit()
+
+        embed = discord.Embed(
+            title="✅ Timezone Set",
+            description=f"Server timezone set to `{timezone}`",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed)
+    except pytz.exceptions.UnknownTimeZoneError:
+        embed = discord.Embed(
+            title="❌ Invalid Timezone",
+            description="Please use a valid timezone name. Examples:\n" +
+                       "• `US/Pacific`\n• `US/Eastern`\n• `Europe/London`\n" +
+                       "• `Asia/Tokyo`\n• `Australia/Sydney`",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="pauseping", description="Pause a reminder temporarily")
+@app_commands.describe(
+    reminder_id="ID of the reminder to pause"
+)
+async def pause_ping(
+    interaction: discord.Interaction,
+    reminder_id: Optional[int] = None
+):
+    if reminder_id is None:
+        # Show reminder selector
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('SELECT * FROM reminders WHERE guild_id = ? AND active = 1', 
+                                (interaction.guild_id,)) as cursor:
+                reminders = await cursor.fetchall()
+                
+        if not reminders:
+            await interaction.response.send_message('❌ No active reminders found!', ephemeral=True)
+            return
+
+        view = ReminderSelectView(reminders, "pause")
+        await interaction.response.send_message(
+            "Select a reminder to pause:",
+            view=view,
+            ephemeral=True
+        )
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Check if reminder exists and is active
+        async with db.execute('SELECT * FROM reminders WHERE id = ? AND guild_id = ?', 
+                            (reminder_id, interaction.guild_id)) as cursor:
+            reminder = await cursor.fetchone()
+
+        if not reminder:
+            await interaction.response.send_message('❌ Reminder not found!', ephemeral=True)
+            return
+
+        if not reminder[12]:  # active status
+            await interaction.response.send_message('❌ Reminder is already paused!', ephemeral=True)
+            return
+
+        # Pause the reminder
+        await db.execute('UPDATE reminders SET active = 0 WHERE id = ?', (reminder_id,))
+        await db.commit()
+
+        embed = await create_reminder_embed(interaction, reminder)
+        embed.title = "⏸️ Reminder Paused"
+        await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="pauseall", description="Pause all reminders in this server")
+async def pause_all(interaction: discord.Interaction):
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Get count of active reminders
+        async with db.execute('SELECT COUNT(*) FROM reminders WHERE guild_id = ? AND active = 1', 
+                            (interaction.guild_id,)) as cursor:
+            count = (await cursor.fetchone())[0]
+
+        if count == 0:
+            await interaction.response.send_message('❌ No active reminders found!', ephemeral=True)
+            return
+
+        # Create confirmation view
+        class ConfirmView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60)
+
+            @discord.ui.button(label=f"Pause {count} Reminders", style=discord.ButtonStyle.danger)
+            async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute('UPDATE reminders SET active = 0 WHERE guild_id = ? AND active = 1',
+                                   (interaction.guild_id,))
+                    await db.commit()
+
+                embed = discord.Embed(
+                    title="⏸️ All Reminders Paused",
+                    description=f"Paused {count} reminders",
+                    color=discord.Color.orange()
+                )
+                await interaction.response.edit_message(embed=embed, view=None)
+
+            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
+            async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                embed = discord.Embed(
+                    title="❌ Operation Cancelled",
+                    description="No reminders were paused",
+                    color=discord.Color.red()
+                )
+                await interaction.response.edit_message(embed=embed, view=None)
+
+        embed = discord.Embed(
+            title="⚠️ Confirm Action",
+            description=f"Are you sure you want to pause all {count} active reminders?",
+            color=discord.Color.yellow()
+        )
+        await interaction.response.send_message(embed=embed, view=ConfirmView())
+
+@bot.tree.command(name="resumeping", description="Resume a paused reminder")
+@app_commands.describe(
+    reminder_id="ID of the reminder to resume"
+)
+async def resume_ping(
+    interaction: discord.Interaction,
+    reminder_id: Optional[int] = None
+):
+    if reminder_id is None:
+        # Show reminder selector
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute('SELECT * FROM reminders WHERE guild_id = ? AND active = 0', 
+                                (interaction.guild_id,)) as cursor:
+                reminders = await cursor.fetchall()
+                
+        if not reminders:
+            await interaction.response.send_message('❌ No paused reminders found!', ephemeral=True)
+            return
+
+        view = ReminderSelectView(reminders, "resume")
+        await interaction.response.send_message(
+            "Select a reminder to resume:",
+            view=view,
+            ephemeral=True
+        )
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Check if reminder exists and is paused
+        async with db.execute('SELECT * FROM reminders WHERE id = ? AND guild_id = ?', 
+                            (reminder_id, interaction.guild_id)) as cursor:
+            reminder = await cursor.fetchone()
+
+        if not reminder:
+            await interaction.response.send_message('❌ Reminder not found!', ephemeral=True)
+            return
+
+        if reminder[12]:  # active status
+            await interaction.response.send_message('❌ Reminder is already active!', ephemeral=True)
+            return
+
+        # Calculate next ping time
+        now = datetime.now()
+        interval_minutes = reminder[7] * TIME_UNITS[reminder[8]]  # interval * unit multiplier
+        next_ping = now + timedelta(minutes=interval_minutes)
+
+        # Resume the reminder
+        await db.execute('''
+            UPDATE reminders 
+            SET active = 1, next_ping = ? 
+            WHERE id = ?
+        ''', (next_ping.isoformat(), reminder_id))
+        await db.commit()
+
+        embed = await create_reminder_embed(interaction, reminder)
+        embed.title = "▶️ Reminder Resumed"
+        await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="schedule", description="View upcoming reminders in chronological order")
+@app_commands.describe(
+    show_all="Show all reminders including inactive ones"
+)
+async def schedule(
+    interaction: discord.Interaction,
+    show_all: bool = False
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Get timezone
+        async with db.execute('SELECT timezone FROM guild_settings WHERE guild_id = ?', 
+                            (interaction.guild_id,)) as cursor:
+            result = await cursor.fetchone()
+            timezone = result[0] if result else 'UTC'
+
+        # Get reminders
+        query = '''
+            SELECT *
+            FROM reminders
+            WHERE guild_id = ?
+        '''
+        if not show_all:
+            query += ' AND active = 1'
+        query += ' ORDER BY next_ping ASC'
+        
+        async with db.execute(query, (interaction.guild_id,)) as cursor:
+            reminders = await cursor.fetchall()
+
+    if not reminders:
+        await interaction.response.send_message(
+            "❌ No upcoming reminders found!",
+            ephemeral=True
+        )
+        return
+
+    tz = pytz.timezone(timezone)
+    now = datetime.now(tz)
+
+    # Create paginated view
+    class ScheduleView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=300)
+            self.page = 0
+            self.max_pages = math.ceil(len(reminders) / ITEMS_PER_PAGE)
+
+        @discord.ui.button(label="Previous", style=discord.ButtonStyle.gray, emoji="◀️", disabled=True)
+        async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.page = max(0, self.page - 1)
+            await self.update_view(interaction)
+
+        @discord.ui.button(label="Next", style=discord.ButtonStyle.gray, emoji="▶️")
+        async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.page = min(self.max_pages - 1, self.page + 1)
+            await self.update_view(interaction)
+
+        async def update_view(self, interaction: discord.Interaction):
+            # Update button states
+            self.prev_button.disabled = self.page == 0
+            self.next_button.disabled = self.page >= self.max_pages - 1
+
+            # Create embed for current page
+            start_idx = self.page * ITEMS_PER_PAGE
+            page_reminders = reminders[start_idx:start_idx + ITEMS_PER_PAGE]
+
+            embed = discord.Embed(
+                title="📅 Upcoming Reminders",
+                description=f"Page {self.page + 1} of {self.max_pages}\nServer timezone: {timezone}",
+                color=discord.Color.blue()
+            )
+
+            for reminder in page_reminders:
+                rid, _, channel_id, _, target_ids, target_type, msg, interval, time_unit, _, next_ping, dm, active, recurring, _ = reminder
+                
+                # Get targets
+                targets = []
+                for tid in target_ids.split(','):
+                    if target_type == 'user':
+                        target = interaction.guild.get_member(int(tid))
+                    else:
+                        target = interaction.guild.get_role(int(tid))
+                    if target:
+                        targets.append(target.mention)
+
+                # Get channel
+                channel = interaction.guild.get_channel(channel_id)
+                
+                # Format next ping time
+                next_time = datetime.fromisoformat(next_ping)
+                if isinstance(next_time, str):
+                    next_time = datetime.fromisoformat(next_time)
+                next_time = pytz.utc.localize(next_time).astimezone(tz)
+                
+                # Calculate time until next ping
+                time_until = next_time - now
+                if time_until.total_seconds() < 0:
+                    time_str = "Overdue!"
+                else:
+                    days = time_until.days
+                    hours = time_until.seconds // 3600
+                    minutes = (time_until.seconds % 3600) // 60
+                    time_parts = []
+                    if days > 0:
+                        time_parts.append(f"{days}d")
+                    if hours > 0:
+                        time_parts.append(f"{hours}h")
+                    if minutes > 0:
+                        time_parts.append(f"{minutes}m")
+                    time_str = f"in {' '.join(time_parts)}" if time_parts else "now"
+
+                status = "🟢" if active else "🔴"
+                repeat = "🔁" if recurring else "1️⃣"
+                location = "📱 DM" if dm else f"📢 {channel.mention if channel else 'Unknown channel'}"
+
+                embed.add_field(
+                    name=f"{status} Reminder #{rid} {repeat}",
+                    value=(
+                        f"**Next:** {next_time.strftime('%I:%M %p')} ({time_str})\n"
+                        f"**To:** {', '.join(targets) or 'No valid targets'}\n"
+                        f"**Where:** {location}\n"
+                        f"**Message:** {msg}"
+                    ),
+                    inline=False
+                )
+
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    view = ScheduleView()
+    await view.update_view(interaction)
 
 # Run the bot
 async def init_db():
