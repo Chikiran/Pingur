@@ -14,6 +14,7 @@ import traceback
 import logging
 import time
 import sys
+import aiohttp
 
 # Setup logging first
 logging.basicConfig(
@@ -498,12 +499,20 @@ async def add_ping(
     channel_display = interaction.guild.get_channel(channel_id) if channel_id else None
 
     # Create simple embed
+    # Get location string
+    if dm:
+        location = "📱 DM"
+    else:
+        location = "📢 Unknown"
+        if channel_display:
+            location = f"📢 {channel_display.mention}"
+
     embed = discord.Embed(
         title="✅ New Ping Created",
         description=f"**ID:** #{reminder_id}\n" +
                    f"**Interval:** Every {interval} {time_unit}\n" +
                    f"**To:** {', '.join(targets_display) or 'No targets'}\n" +
-                   f"**Where:** {'📱 DM' if dm else f'📢 {channel_display.mention if channel_display else 'Unknown'}'}\n" +
+                   f"**Where:** {location}\n" +
                    f"**Message:** {message}",
         color=discord.Color.green()
     )
@@ -919,7 +928,12 @@ async def list_reminders(
                             time_str = "Invalid time"
 
                         status = "🟢" if active else "🔴"
-                        location = "📱 DM" if dm else f"📢 {channel.mention if channel else 'Unknown'}"
+                        if dm:
+                            location = "📱 DM"
+                        else:
+                            location = "📢 Unknown"
+                            if channel:
+                                location = f"📢 {channel.mention}"
                         
                         rows.append(
                             f"**#{rid}** | {status} | {time_str} | {location}\n"
@@ -1566,6 +1580,170 @@ async def remove_ping(interaction: discord.Interaction):
         traceback.print_exc()
         await interaction.followup.send(
             "An error occurred. Please try again later.",
+            ephemeral=True
+        )
+
+def is_bot_owner():
+    async def predicate(interaction: discord.Interaction):
+        application = await interaction.client.application_info()
+        if interaction.user.id != application.owner.id:
+            await interaction.response.send_message("❌ This command is restricted to the bot owner.", ephemeral=True)
+            return False
+        return True
+    return app_commands.check(predicate)
+
+@bot.tree.command(name="setstatus", description="Set the bot's status (Owner only)")
+@app_commands.describe(
+    status_type="The type of status to set",
+    activity="What the bot is doing",
+    url="URL for streaming status (optional)"
+)
+@is_bot_owner()
+async def set_status(
+    interaction: discord.Interaction,
+    status_type: Literal['playing', 'watching', 'listening', 'streaming'],
+    activity: str,
+    url: Optional[str] = None
+):
+    try:
+        if status_type == 'playing':
+            activity_type = discord.ActivityType.playing
+        elif status_type == 'watching':
+            activity_type = discord.ActivityType.watching
+        elif status_type == 'listening':
+            activity_type = discord.ActivityType.listening
+        else:  # streaming
+            activity_type = discord.ActivityType.streaming
+
+        if status_type == 'streaming' and not url:
+            await interaction.response.send_message(
+                "❌ URL is required for streaming status!",
+                ephemeral=True
+            )
+            return
+
+        game = discord.Activity(
+            type=activity_type,
+            name=activity,
+            url=url if status_type == 'streaming' else None
+        )
+        await bot.change_presence(activity=game)
+
+        embed = discord.Embed(
+            title="✅ Status Updated",
+            description=f"Status set to: {status_type.title()} {activity}",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        logger.error(f"Error in set_status: {str(e)}")
+        await interaction.response.send_message(
+            "❌ Failed to update status!",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="setnick", description="Set the bot's nickname in the current server (Owner only)")
+@app_commands.describe(
+    nickname="New nickname for the bot (leave empty to reset)"
+)
+@is_bot_owner()
+async def set_nickname(
+    interaction: discord.Interaction,
+    nickname: Optional[str] = None
+):
+    try:
+        await interaction.guild.me.edit(nick=nickname)
+        embed = discord.Embed(
+            title="✅ Nickname Updated",
+            description=f"Nickname {'reset' if nickname is None else f'set to: {nickname}'}",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "❌ I don't have permission to change my nickname!",
+            ephemeral=True
+        )
+    except Exception as e:
+        logger.error(f"Error in set_nickname: {str(e)}")
+        await interaction.response.send_message(
+            "❌ Failed to update nickname!",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="setavatar", description="Set the bot's avatar (Owner only)")
+@app_commands.describe(
+    url="URL of the new avatar image"
+)
+@is_bot_owner()
+async def set_avatar(
+    interaction: discord.Interaction,
+    url: str
+):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    await interaction.response.send_message(
+                        "❌ Failed to download image!",
+                        ephemeral=True
+                    )
+                    return
+                
+                avatar_bytes = await response.read()
+                
+        await bot.user.edit(avatar=avatar_bytes)
+        embed = discord.Embed(
+            title="✅ Avatar Updated",
+            description="Bot's avatar has been updated!",
+            color=discord.Color.green()
+        )
+        embed.set_thumbnail(url=url)
+        await interaction.response.send_message(embed=embed)
+    except discord.HTTPException as e:
+        error_msg = "❌ Failed to update avatar! "
+        if e.code == 50035:
+            error_msg += "Invalid image format (must be PNG, JPG, or GIF)"
+        elif e.code == 50138:
+            error_msg += "Image file is too large (max 8MB)"
+        else:
+            error_msg += str(e)
+        await interaction.response.send_message(error_msg, ephemeral=True)
+    except Exception as e:
+        logger.error(f"Error in set_avatar: {str(e)}")
+        await interaction.response.send_message(
+            "❌ Failed to update avatar!",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="setbio", description="Set the bot's 'About Me' description (Owner only)")
+@app_commands.describe(
+    bio="New 'About Me' text for the bot"
+)
+@is_bot_owner()
+async def set_bio(
+    interaction: discord.Interaction,
+    bio: str
+):
+    try:
+        await bot.user.edit(bio=bio)
+        embed = discord.Embed(
+            title="✅ Bio Updated",
+            description=f"Bot's bio has been updated to:\n\n{bio}",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed)
+    except discord.HTTPException as e:
+        error_msg = "❌ Failed to update bio! "
+        if e.code == 50035:
+            error_msg += "Bio must be 190 characters or less"
+        else:
+            error_msg += str(e)
+        await interaction.response.send_message(error_msg, ephemeral=True)
+    except Exception as e:
+        logger.error(f"Error in set_bio: {str(e)}")
+        await interaction.response.send_message(
+            "❌ Failed to update bio!",
             ephemeral=True
         )
 
