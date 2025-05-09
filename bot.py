@@ -239,25 +239,28 @@ async def setup_database(db):
                 )
             ''')
             
-            # Copy data from backup to new table
+            # Copy data from backup to new table, explicitly setting ghost_ping to false
             await db.execute('''
                 INSERT INTO reminders (
                     id, guild_id, channel_id, user_id, target_ids, target_type,
                     message, interval, time_unit, last_ping, next_ping,
-                    dm, active, recurring, created_at
+                    dm, active, recurring, ghost_ping, created_at
                 )
                 SELECT 
                     id, guild_id, channel_id, user_id, target_ids, target_type,
                     message, interval, time_unit, last_ping, next_ping,
-                    dm, active, recurring, created_at
+                    dm, active, recurring, 0, created_at
                 FROM reminders_backup
             ''')
             
             # Drop the backup table
             await db.execute('DROP TABLE reminders_backup')
             
+            # Update any existing reminders to ensure ghost_ping is false
+            await db.execute('UPDATE reminders SET ghost_ping = 0 WHERE ghost_ping IS NULL')
+            
             await db.commit()
-            logger.info("Successfully added ghost_ping column")
+            logger.info("Successfully added ghost_ping column and migrated data")
         except Exception as e:
             logger.error(f"Error adding ghost_ping column: {str(e)}")
             # Try to restore from backup if something went wrong
@@ -1101,75 +1104,86 @@ async def check_reminders():
                 reminders = await cursor.fetchall()
 
             for reminder in reminders:
-                id, guild_id, channel_id, user_id, target_ids_str, target_type, message, interval, time_unit, last_ping, next_ping, is_dm, active, recurring, ghost_ping, created_at = reminder
-                
-                guild = bot.get_guild(guild_id)
-                if not guild:
-                    logger.error(f'Could not find guild {guild_id} for reminder {id}')
-                    continue
-
-                # Get targets
-                target_ids = [int(tid) for tid in target_ids_str.split(',')]
-                targets = []
-                for tid in target_ids:
-                    if target_type == 'user':
-                        target = guild.get_member(tid)
-                    else:
-                        target = guild.get_role(tid)
-                    if target:
-                        targets.append(target)
-
-                if not targets:
-                    logger.error(f'No valid targets found for reminder {id} in guild {guild.name}')
-                    continue
-
                 try:
-                    if is_dm and target_type == 'user':
-                        for target in targets:
-                            await target.send(f'{message}')
-                    else:
-                        channel = guild.get_channel(channel_id)
-                        if channel:
-                            mentions = ' '.join(target.mention for target in targets)
-                            sent_message = await channel.send(f'{mentions} {message}')
-                            
-                            # Only delete if this is a ghost ping
-                            if ghost_ping and sent_message:  # Make sure message was sent successfully
-                                try:
-                                    await asyncio.sleep(0.1)  # Brief delay to ensure the ping goes through
-                                    await sent_message.delete()
-                                    logger.info(f"Successfully deleted ghost ping message for reminder {id}")
-                                except Exception as e:
-                                    logger.error(f'Failed to delete ghost ping message: {str(e)}')
-
-                    # Update last ping and next ping times
-                    if recurring:
-                        interval_minutes = interval * TIME_UNITS[time_unit]
-                        # Calculate next ping time, ensuring it's in the future
-                        next_ping_time = now
-                        while next_ping_time <= now:
-                            next_ping_time += timedelta(minutes=interval_minutes)
-                        
-                        await db.execute('''
-                            UPDATE reminders 
-                            SET last_ping = ?, next_ping = ?
-                            WHERE id = ?
-                        ''', (now.isoformat(), next_ping_time.isoformat(), id))
-                    else:
-                        # For one-time reminders, deactivate after sending
-                        await db.execute('''
-                            UPDATE reminders 
-                            SET active = 0, last_ping = ?
-                            WHERE id = ?
-                        ''', (now.isoformat(), id))
+                    # Properly unpack all fields including ghost_ping
+                    (id, guild_id, channel_id, user_id, target_ids_str, target_type, 
+                     message, interval, time_unit, last_ping, next_ping, is_dm, active, 
+                     recurring, ghost_ping, created_at) = reminder
                     
-                    await db.commit()
-                    logger.info(f"Successfully processed reminder {id} for guild {guild.name}")
-                except discord.Forbidden:
-                    logger.error(f'Failed to send message to targets in guild {guild.name} - Missing permissions')
+                    # Ensure ghost_ping is a boolean and has a default value
+                    ghost_ping = bool(ghost_ping) if ghost_ping is not None else False
+                    
+                    guild = bot.get_guild(guild_id)
+                    if not guild:
+                        logger.error(f'Could not find guild {guild_id} for reminder {id}')
+                        continue
+
+                    # Get targets
+                    target_ids = [int(tid) for tid in target_ids_str.split(',')]
+                    targets = []
+                    for tid in target_ids:
+                        if target_type == 'user':
+                            target = guild.get_member(tid)
+                        else:
+                            target = guild.get_role(tid)
+                        if target:
+                            targets.append(target)
+
+                    if not targets:
+                        logger.error(f'No valid targets found for reminder {id} in guild {guild.name}')
+                        continue
+
+                    try:
+                        if is_dm and target_type == 'user':
+                            for target in targets:
+                                await target.send(f'{message}')
+                        else:
+                            channel = guild.get_channel(channel_id)
+                            if channel:
+                                mentions = ' '.join(target.mention for target in targets)
+                                sent_message = await channel.send(f'{mentions} {message}')
+                                
+                                # Only delete if this is explicitly a ghost ping
+                                if ghost_ping and sent_message:
+                                    try:
+                                        await asyncio.sleep(0.1)  # Brief delay to ensure the ping goes through
+                                        await sent_message.delete()
+                                        logger.info(f"Successfully deleted ghost ping message for reminder {id}")
+                                    except Exception as e:
+                                        logger.error(f'Failed to delete ghost ping message for reminder {id}: {str(e)}')
+
+                        # Update last ping and next ping times
+                        if recurring:
+                            interval_minutes = interval * TIME_UNITS[time_unit]
+                            # Calculate next ping time, ensuring it's in the future
+                            next_ping_time = now
+                            while next_ping_time <= now:
+                                next_ping_time += timedelta(minutes=interval_minutes)
+                            
+                            await db.execute('''
+                                UPDATE reminders 
+                                SET last_ping = ?, next_ping = ?
+                                WHERE id = ?
+                            ''', (now.isoformat(), next_ping_time.isoformat(), id))
+                        else:
+                            # For one-time reminders, deactivate after sending
+                            await db.execute('''
+                                UPDATE reminders 
+                                SET active = 0, last_ping = ?
+                                WHERE id = ?
+                            ''', (now.isoformat(), id))
+                        
+                        await db.commit()
+                        logger.info(f"Successfully processed reminder {id} for guild {guild.name}")
+                    except discord.Forbidden:
+                        logger.error(f'Failed to send message to targets in guild {guild.name} - Missing permissions')
+                    except Exception as e:
+                        logger.error(f'Error processing reminder {id}: {str(e)}')
+                        traceback.print_exc()
                 except Exception as e:
                     logger.error(f'Error processing reminder {id}: {str(e)}')
                     traceback.print_exc()
+                    continue
 
     except Exception as e:
         logger.error(f"Error in check_reminders: {str(e)}")
