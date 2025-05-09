@@ -45,41 +45,18 @@ class PingurBot(commands.Bot):
         print(f"Intents configured: {intents.value}")
 
     async def setup_hook(self):
-        """Initial setup when bot starts"""
-        print("\n=== Bot Setup Starting ===")
-        print(f"Bot User ID: {self.user.id if self.user else 'Not logged in yet'}")
-        print(f"Command Prefix: {self.command_prefix}")
-        print(f"Number of commands: {len(self.tree.get_commands())}")
+        print("\n=== Command Registration Debug ===")
+        print(f"Available commands before sync: {[cmd.name for cmd in self.tree.get_commands()]}")
         
         try:
-            print("\nAttempting command sync...")
-            # Store commands before sync
-            before_commands = set(cmd.name for cmd in self.tree.get_commands())
-            print(f"Commands before sync: {before_commands}")
-            
-            # Clear and sync
-            self.tree.clear_commands(guild=None)
-            await self.tree.sync()
-            
-            # Store commands after sync
-            after_commands = set(cmd.name for cmd in self.tree.get_commands())
-            print(f"Commands after sync: {after_commands}")
-            
-            # Check what changed
-            new_commands = after_commands - before_commands
-            removed_commands = before_commands - after_commands
-            print(f"New commands: {new_commands}")
-            print(f"Removed commands: {removed_commands}")
-            
-            self.initial_sync_done = True
-            print("\n=== Bot Setup Completed ===")
+            # First sync attempt
+            commands = await self.tree.sync()
+            print(f"First sync completed - Registered {len(commands)} commands:")
+            for cmd in commands:
+                print(f"- {cmd.name} ({cmd.type})")
         except Exception as e:
-            print("\n!!! Command Sync Failed !!!")
-            print(f"Error type: {type(e).__name__}")
-            print(f"Error message: {str(e)}")
-            print("Traceback:")
+            print(f"First sync failed: {str(e)}")
             traceback.print_exc()
-            print("\n=== Bot Setup Failed ===")
 
     async def on_ready(self):
         """Called when bot is ready"""
@@ -87,20 +64,28 @@ class PingurBot(commands.Bot):
         print(f"Logged in as: {self.user} (ID: {self.user.id})")
         print(f"Connected to {len(self.guilds)} guilds")
         
+        try:
+            # Force a fresh sync on ready
+            self.tree.clear_commands(guild=None)
+            await self.tree.sync()
+            
+            # Sync to each guild individually
+            for guild in self.guilds:
+                try:
+                    guild_commands = await self.tree.sync(guild=guild)
+                    print(f"\nSynced to {guild.name}:")
+                    for cmd in guild_commands:
+                        print(f"- {cmd.name}")
+                except Exception as e:
+                    print(f"Failed sync to {guild.name}: {e}")
+        except Exception as e:
+            print(f"Ready sync failed: {e}")
+            traceback.print_exc()
+        
         for guild in self.guilds:
             print(f"\nGuild: {guild.name} (ID: {guild.id})")
             print(f"Bot's roles: {', '.join(role.name for role in guild.me.roles)}")
             print(f"Bot's permissions: {guild.me.guild_permissions.value}")
-        
-        if not self.initial_sync_done:
-            try:
-                print("\nAttempting additional command sync...")
-                await self.tree.sync()
-                print("Additional sync completed")
-                self.initial_sync_done = True
-            except Exception as e:
-                print(f"Additional sync failed: {str(e)}")
-                traceback.print_exc()
         
         check_reminders.start()
         print("\n=== Bot Ready Event Completed ===")
@@ -203,7 +188,7 @@ async def create_reminder_embed(interaction: discord.Interaction, reminder: tupl
         inline=True
     )
     embed.add_field(
-        name="📍 Location",
+        name="�� Location",
         value=f"Channel: {channel.mention if channel else 'Unknown'}\nDM: {dm}",
         inline=True
     )
@@ -1252,5 +1237,61 @@ async def bot_diagnostics(interaction: discord.Interaction):
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=error_embed)
+
+@bot.tree.command(name="debugbot", description="Check bot permissions and command registration")
+async def debug_bot(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🔍 Bot Debug Info",
+        color=discord.Color.blue()
+    )
+    
+    # Bot info
+    embed.add_field(
+        name="Bot Info",
+        value=f"Name: {bot.user.name}\n"
+              f"ID: {bot.user.id}\n"
+              f"Latency: {round(bot.latency * 1000)}ms",
+        inline=False
+    )
+    
+    # Command registration
+    commands = await bot.tree.fetch_commands()
+    embed.add_field(
+        name="Registered Commands",
+        value="\n".join(f"• {cmd.name}" for cmd in commands) or "No commands found",
+        inline=False
+    )
+    
+    # Guild specific
+    guild_commands = await bot.tree.fetch_commands(guild=interaction.guild)
+    embed.add_field(
+        name="Guild Commands",
+        value="\n".join(f"• {cmd.name}" for cmd in guild_commands) or "No guild commands",
+        inline=False
+    )
+    
+    # Permissions
+    perms = interaction.guild.me.guild_permissions
+    important_perms = [
+        "view_channel",
+        "send_messages",
+        "use_external_emojis",
+        "add_reactions",
+        "read_message_history",
+        "manage_messages"
+    ]
+    
+    perm_status = []
+    for perm in important_perms:
+        status = "✅" if getattr(perms, perm) else "❌"
+        perm_status.append(f"{status} {perm}")
+    
+    embed.add_field(
+        name="Permissions",
+        value="\n".join(perm_status),
+        inline=False
+    )
+    
+    await interaction.response.send_message(embed=embed)
 
 bot.run(os.getenv('DISCORD_TOKEN')) 
