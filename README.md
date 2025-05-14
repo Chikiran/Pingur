@@ -34,7 +34,7 @@ Pingurrr
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/pingur.git
+git clone https://github.com/chikiran/pingur.git
 cd pingur
 ```
 
