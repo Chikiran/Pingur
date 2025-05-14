@@ -1192,26 +1192,41 @@ async def check_reminders():
                                 logger.info(f"Sent DM for reminder {id} to {target.name}")
                         else:
                             channel = guild.get_channel(channel_id)
-                            if channel:
-                                mentions = ' '.join(target.mention for target in targets)
-                                sent_message = await channel.send(f'{mentions} {message}')
+                            if not channel:
+                                logger.error(f'Could not find channel {channel_id} for reminder {id}')
+                                continue
                                 
-                                # Only delete if this is explicitly a ghost ping
-                                if is_ghost_ping:
-                                    try:
-                                        await asyncio.sleep(0.1)  # Brief delay to ensure the ping goes through
-                                        await sent_message.delete()
-                                        logger.info(f"Successfully deleted ghost ping message for reminder {id}")
-                                    except Exception as e:
-                                        logger.error(f'Failed to delete ghost ping message for reminder {id}: {str(e)}')
-                                else:
-                                    logger.info(f"Regular ping message sent and kept for reminder {id}")
+                            # Check permissions before sending
+                            bot_member = guild.me
+                            channel_perms = channel.permissions_for(bot_member)
+                            
+                            if not channel_perms.send_messages:
+                                logger.error(f'Missing send_messages permission in channel {channel.name} for reminder {id}')
+                                continue
+                                
+                            if is_ghost_ping and not channel_perms.manage_messages:
+                                logger.error(f'Missing manage_messages permission in channel {channel.name} for ghost ping {id}')
+                                continue
+
+                            mentions = ' '.join(target.mention for target in targets)
+                            sent_message = await channel.send(f'{mentions} {message}')
+                            
+                            # Only delete if this is explicitly a ghost ping
+                            if is_ghost_ping:
+                                try:
+                                    await asyncio.sleep(0.1)  # Brief delay to ensure the ping goes through
+                                    await sent_message.delete()
+                                    logger.info(f"Successfully deleted ghost ping message for reminder {id}")
+                                except Exception as e:
+                                    logger.error(f'Failed to delete ghost ping message for reminder {id}: {str(e)}')
+                            else:
+                                logger.info(f"Regular ping message sent and kept for reminder {id}")
 
                         # Update last ping and next ping times
                         if is_recurring:
-                            # Calculate next ping time
+                            # Calculate next ping time using UTC
                             interval_minutes = interval * TIME_UNITS[time_unit]
-                            next_ping_time = datetime.now(pytz.utc) + timedelta(minutes=interval_minutes)
+                            next_ping_time = now + timedelta(minutes=interval_minutes)
                             
                             await db.execute('''
                                 UPDATE reminders 
@@ -2000,6 +2015,34 @@ async def ghost_ping(
 
         await interaction.response.defer(ephemeral=True)
         
+        # Check bot permissions in the channel
+        if channel:
+            target_channel = channel
+        else:
+            target_channel = interaction.channel
+            
+        if not target_channel:
+            await interaction.followup.send("❌ Could not determine target channel!", ephemeral=True)
+            return
+            
+        # Check bot permissions
+        bot_member = interaction.guild.me
+        channel_perms = target_channel.permissions_for(bot_member)
+        
+        if not channel_perms.send_messages:
+            await interaction.followup.send(
+                f"❌ I don't have permission to send messages in {target_channel.mention}!",
+                ephemeral=True
+            )
+            return
+            
+        if not channel_perms.manage_messages:
+            await interaction.followup.send(
+                f"❌ I don't have permission to delete messages in {target_channel.mention}! This is required for ghost pings.",
+                ephemeral=True
+            )
+            return
+
         # Get server timezone
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute('SELECT timezone FROM guild_settings WHERE guild_id = ?', 
